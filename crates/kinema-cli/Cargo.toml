@@ -10,6 +10,7 @@ name = "kin"
 path = "src/main.rs"
 
 [dependencies]
+kinema-palette.workspace = true
 kinema-type.workspace = true
 kinema-text.workspace = true
 kinema-time.workspace = true

@@ -65,6 +65,13 @@ Built in P0 as well: `kinema-type` — the house scale (16 px × 1.25), optical 
 tightens display and opens small text, leading that runs 1.5 → 1.1 with size, pairings
 with a stated reason and a role assignment, and the `TYPE-SCALE` detector that snaps an
 off-scale size and reports a fifth size as advisory.
+
+Colour: `kinema-palette` builds a palette from one accent in OKLCH — a ground, a raised
+surface, text, a muted tone that still passes at 4.5:1, and an accent proven at 3:1 on the
+ground with its ink proven at 4.5:1 on itself. Chroma is clamped by bisection to what sRGB
+can actually show, and the neutrals carry the accent's hue at low chroma so the ramp reads
+as one system. `kin palette` prints the tokens with their proofs. Extraction from an image
+still waits for the media crate.
 - `palette from <image|brand|video>` extracts in OKLab, assigns roles (bg, surface, text,
   muted, accent), gamut-maps to Rec.709 so video never clips, and proves every
   text-on-surface pair with contrast ratios. One accent, one neutral ramp, no rainbow

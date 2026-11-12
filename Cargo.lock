@@ -172,6 +172,7 @@ dependencies = [
  "kinema-deps",
  "kinema-doc",
  "kinema-expr",
+ "kinema-palette",
  "kinema-raster",
  "kinema-text",
  "kinema-time",
@@ -202,6 +203,13 @@ dependencies = [
 [[package]]
 name = "kinema-expr"
 version = "0.1.0"
+
+[[package]]
+name = "kinema-palette"
+version = "0.1.0"
+dependencies = [
+ "kinema-doc",
+]
 
 [[package]]
 name = "kinema-raster"

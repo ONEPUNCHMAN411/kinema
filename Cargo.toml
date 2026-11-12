@@ -5,6 +5,7 @@ members = [
     "crates/kinema-expr",
     "crates/kinema-text",
     "crates/kinema-type",
+    "crates/kinema-palette",
     "crates/kinema-doc",
     "crates/kinema-deps",
     "crates/kinema-raster",
@@ -24,6 +25,7 @@ kinema-time = { path = "crates/kinema-time" }
 kinema-expr = { path = "crates/kinema-expr" }
 kinema-text = { path = "crates/kinema-text" }
 kinema-type = { path = "crates/kinema-type" }
+kinema-palette = { path = "crates/kinema-palette" }
 kinema-doc = { path = "crates/kinema-doc" }
 kinema-deps = { path = "crates/kinema-deps" }
 kinema-raster = { path = "crates/kinema-raster" }

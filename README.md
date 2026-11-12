@@ -46,6 +46,10 @@ Built:
 - `kinema-deps` — canonical JSON and content hashes for documents, layers and frames.
 - `kinema-text` — real faces, bundled: measurement, kerning, line layout, alignment and
   antialiased glyph rasterisation, with licence and attribution carried as data.
+- `kinema-type` — the modular scale, optical tracking and leading, and pairings that come
+  with a reason and a role assignment.
+- `kinema-palette` — one accent plus a tinted neutral ramp, built in OKLCH, gamut-mapped,
+  with a measured proof for every pair that carries meaning.
 - `kinema-raster` — CPU RGBA canvas, blend modes, real type, motion blur by subframe
   integration, PNG out.
 - `kinema-checks` — the first craft detectors with `fix_op` remedies.
@@ -102,6 +106,9 @@ kin check --project demo --fix   # apply them until nothing fixable is left
 kin credits --project demo       # licence summary and release gate
 kin log --project demo           # the op journal
 kin fonts                        # bundled families, weights, licence and attribution
+kin type                         # the modular scale with optical spacing
+kin typeface recommend "a technical developer video about data"
+kin palette --accent '#3b82f6' --scheme dark   # roles with contrast proofs
 kin asset add still.png --project demo --spdx cc-by-4.0 --source-url <url> --author <name>
 kin undo --project demo          # replay the journal's inverses
 kin verify --project demo --manifest demo/frames/manifest.json --render

@@ -64,6 +64,7 @@ fn dispatch(argv: &[String]) -> R {
         "fonts" | "typefaces" => Ok(cmd_fonts()),
         "type" | "scale" => Ok(cmd_type(argv)),
         "typeface" => Ok(cmd_typeface(argv)),
+        "palette" => cmd_palette(argv),
         "schema" => Ok(schema::doc_schema()),
         "help" | "--help" | "-h" => Ok(help()),
         "version" | "--version" | "-V" => {
@@ -100,8 +101,8 @@ fn not_implemented(verb: &str) -> Value {
             "bundled faces are read-only in this build; `kin fonts` lists them, and adding faces lands in P4",
             "P4",
         ),
-        "palette" => (
-            "OKLab palette extraction lands in P4; PALETTE already scores the result",
+        "palette from" => (
+            "extracting a palette from an image needs the media crate (P4); `kin palette --accent` builds and proves one now",
             "P4",
         ),
         "skills" | "library" | "save" | "judge" => {
@@ -151,6 +152,7 @@ fn capabilities() -> Value {
             {"name": "fonts", "summary": "bundled families, weights, licence and attribution", "args": []},
             {"name": "type", "summary": "the modular scale with optical tracking and leading", "args": ["--base <px>", "--ratio <f>", "--steps <n>"]},
             {"name": "typeface", "summary": "pick a pairing from a brief, with reasons and a role assignment", "args": ["recommend <brief>"]},
+            {"name": "palette", "summary": "roles and contrast proofs from one accent", "args": ["--accent <#rrggbb>", "--scheme dark|light"]},
             {"name": "log", "summary": "the op journal", "args": []}
         ],
         "licences": ["cc0-1.0", "cc-by-4.0", "cc-by-sa-4.0", "cc-by-nc-4.0", "cc-by-nd-4.0", "mit", "apache-2.0", "bsd-3-clause", "ofl-1.1", "unknown"],
@@ -193,6 +195,58 @@ fn capabilities() -> Value {
 
 /// The bundle as data: what a document may name, what each family ships, and where its
 /// licence text lives.
+fn cmd_palette(argv: &[String]) -> R {
+    let spec = get(argv, "--accent").unwrap_or("#3b82f6");
+    let accent = kinema_doc::Rgba::parse(spec).map_err(|e| {
+        json!({
+            "ok": false,
+            "error": {
+                "code": "bad-colour",
+                "message": e,
+                "hint": "pass --accent as #rgb or #rrggbb, e.g. --accent '#3b82f6'",
+                "fix_op": null,
+                "doc": "docs/PLAN.md#type-and-colour"
+            }
+        })
+    })?;
+    let scheme = get(argv, "--scheme").unwrap_or("dark");
+    if scheme != "dark" && scheme != "light" {
+        return Err(usage("--scheme is dark or light"));
+    }
+    let tokens = kinema_palette::scheme(accent, scheme == "dark");
+    let proofs: Vec<Value> = tokens
+        .proofs()
+        .iter()
+        .map(|p| {
+            json!({
+                "pair": format!("{} on {}", p.fg, p.bg),
+                "ratio": p.ratio,
+                "target": p.target,
+                "pass": p.pass,
+            })
+        })
+        .collect();
+    let roles: Vec<Value> = tokens
+        .roles()
+        .iter()
+        .map(|(name, colour)| json!({ "role": name, "value": colour.to_hex() }))
+        .collect();
+    Ok(json!({
+        "ok": true,
+        "scheme": scheme,
+        "accent": accent.to_hex(),
+        "tokens": roles,
+        "proofs": proofs,
+        "clean": proofs.iter().all(|p| p["pass"] == json!(true)),
+        "rules": [
+            "one accent hue, neutrals tinted with it, no rainbow gradient",
+            "text is proven on both the ground and the raised surface",
+            "accent_ink is proven on the accent itself, so a button label always reads",
+            "PALETTE reports a document that reaches for a second accent hue"
+        ],
+    }))
+}
+
 fn cmd_type(argv: &[String]) -> Value {
     let num = |flag: &str, default: f64| {
         get(argv, flag)
