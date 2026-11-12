@@ -62,6 +62,7 @@ pub fn run(doc: &Doc, comp: &str, frame: Option<u32>) -> Vec<Defect> {
     chroma(doc, comp, &mut out);
     palette(doc, comp, &mut out);
     look_drift(doc, comp, &mut out);
+    banding(doc, comp, &mut out);
     ease_flat(doc, comp, &mut out);
     hold_none(doc, comp, &mut out);
     shutter(doc, comp, &mut out);
@@ -385,6 +386,68 @@ fn type_scale(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
             hint: "four sizes is a hierarchy; more is a slide deck. Which size to drop is a directing call, so `kin type` shows the ladder to choose from".into(),
             fix_op: None,
         });
+    }
+}
+
+/// A ramp quantised to 8 bits per channel shows its steps. Measure the longest run of one
+/// colour across the gradient: that run is the band, and dithering is the remedy.
+fn banding(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
+    let Ok(c) = doc.comp(comp) else { return };
+    let (w, h) = (c.size[0] as f64, c.size[1] as f64);
+    for layer in &c.layers {
+        let (field, g) = if let Some(g) = layer.solid.as_ref().and_then(|s| s.gradient.as_ref()) {
+            ("solid.gradient", g)
+        } else if let Some(g) = layer.shape.as_ref().and_then(|s| s.gradient.as_ref()) {
+            ("shape.gradient", g)
+        } else {
+            continue;
+        };
+        if g.dither {
+            continue;
+        }
+        let y = h / 2.0;
+        let mut prev = g.sample(g.project(0.5, y, 0.0, 0.0, w, h));
+        let mut run = 1usize;
+        let mut longest = 1usize;
+        let mut x = 1usize;
+        while (x as f64) < w {
+            let colour = g.sample(g.project(x as f64 + 0.5, y, 0.0, 0.0, w, h));
+            if colour == prev {
+                run += 1;
+            } else {
+                run = 1;
+                prev = colour;
+            }
+            longest = longest.max(run);
+            x += 1;
+        }
+        // Sixteen pixels of one colour is where a ramp stops reading as a ramp.
+        if longest > 16 {
+            out.push(Defect {
+                code: "BANDING",
+                severity: "warn",
+                comp: comp.into(),
+                layer: Some(layer.id.clone()),
+                frame: None,
+                evidence: json!({
+                    "reason": "flat run in a ramp",
+                    "longest_run_px": longest,
+                    "span_px": w,
+                    "stops": g.stops.len(),
+                    "dither": g.dither,
+                }),
+                hint: format!(
+                    "the ramp holds {} px of a single colour ({:.1}% of the width), which reads as a band on a good display",
+                    longest,
+                    longest as f64 / w * 100.0
+                ),
+                fix_op: Some(set_prop(
+                    format!("comp:{comp}/layer:{}/{field}.dither", layer.id),
+                    json!(true),
+                    "dither the ramp so 8-bit steps dissolve into noise",
+                )),
+            });
+        }
     }
 }
 
@@ -920,6 +983,7 @@ mod tests {
         let layers = &mut doc.comps.get_mut("main").unwrap().layers;
         layers[0].solid = Some(kinema_doc::Solid {
             color: Rgba::opaque(0x40, 0x10, 0xa0),
+            gradient: None,
         });
         let text = layers[2].text.as_mut().unwrap();
         text.size = 24.0;
@@ -934,6 +998,7 @@ mod tests {
         let layers = &mut doc.comps.get_mut("main").unwrap().layers;
         layers[0].solid = Some(kinema_doc::Solid {
             color: Rgba::opaque(0x40, 0x10, 0xa0),
+            gradient: None,
         });
         layers[2].transform.position.as_mut().unwrap().ease = Some("linear".into());
         let text = layers[2].text.as_mut().unwrap();
@@ -1063,6 +1128,64 @@ mod tests {
         let op: kinema_doc::Op = serde_json::from_value(d.fix_op.clone().unwrap()).unwrap();
         doc.apply(&op).unwrap();
         assert!(!defects(&doc).iter().any(|d| d.code == "LOOK-DRIFT"));
+    }
+
+    fn bg_gradient() -> kinema_doc::Gradient {
+        kinema_doc::Gradient {
+            kind: kinema_doc::GradientKind::Linear,
+            angle: 0.0,
+            stops: vec![
+                kinema_doc::Stop {
+                    at: 0.0,
+                    color: kinema_doc::Rgba::opaque(0x10, 0x12, 0x18),
+                },
+                kinema_doc::Stop {
+                    at: 1.0,
+                    color: kinema_doc::Rgba::opaque(0x16, 0x18, 0x20),
+                },
+            ],
+            dither: false,
+        }
+    }
+
+    #[test]
+    fn a_flat_ramp_is_caught_and_dithered() {
+        let mut doc = Doc::starter();
+        doc.comps.get_mut("main").unwrap().layers[0]
+            .solid
+            .as_mut()
+            .unwrap()
+            .gradient = Some(bg_gradient());
+        let found = defects(&doc);
+        let d = found.iter().find(|d| d.code == "BANDING").expect("BANDING");
+        assert!(d.evidence["longest_run_px"].as_u64().unwrap() > 16);
+        let op: kinema_doc::Op = serde_json::from_value(d.fix_op.clone().unwrap()).unwrap();
+        doc.apply(&op).unwrap();
+        assert!(
+            doc.comps["main"].layers[0]
+                .solid
+                .as_ref()
+                .unwrap()
+                .gradient
+                .as_ref()
+                .unwrap()
+                .dither,
+            "the remedy turns dithering on"
+        );
+        assert!(!defects(&doc).iter().any(|d| d.code == "BANDING"));
+    }
+
+    #[test]
+    fn a_dithered_ramp_is_left_alone() {
+        let mut doc = Doc::starter();
+        let mut g = bg_gradient();
+        g.dither = true;
+        doc.comps.get_mut("main").unwrap().layers[0]
+            .solid
+            .as_mut()
+            .unwrap()
+            .gradient = Some(g);
+        assert!(!defects(&doc).iter().any(|d| d.code == "BANDING"));
     }
 
     #[test]

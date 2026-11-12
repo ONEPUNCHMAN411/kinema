@@ -207,6 +207,9 @@ fn default_opacity() -> Prop {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Solid {
     pub color: Rgba,
+    /// When present, it fills the layer instead of `color`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gradient: Option<Gradient>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -225,6 +228,149 @@ pub struct Shape {
     pub color: Rgba,
     #[serde(default)]
     pub radius: f64,
+    /// Painted over `color` across the shape's box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gradient: Option<Gradient>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GradientKind {
+    #[default]
+    Linear,
+    Radial,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Stop {
+    /// Position along the gradient, 0 to 1.
+    pub at: f64,
+    pub color: Rgba,
+}
+
+/// A ramp. Stops are interpolated in linear light, and `dither` decides whether the
+/// result is quantised to 8 bits with a fixed ordered pattern or left to band.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Gradient {
+    #[serde(default)]
+    pub kind: GradientKind,
+    /// Degrees for linear: 0 runs left to right, 90 runs bottom to top.
+    #[serde(default)]
+    pub angle: f64,
+    pub stops: Vec<Stop>,
+    #[serde(default)]
+    pub dither: bool,
+}
+
+impl Gradient {
+    /// Linear-light channels at position `t`, clamped at the ends.
+    ///
+    /// This is what a renderer wants: the caller quantises, so it can dither first.
+    pub fn sample_linear(&self, t: f64) -> [f64; 3] {
+        let t = t.clamp(0.0, 1.0);
+        let Some(first) = self.stops.first() else {
+            return [0.0; 3];
+        };
+        let mix_into = |a: Rgba, b: Rgba, u: f64| -> [f64; 3] {
+            let ch = |x: u8, y: u8| {
+                let x = Rgba::linear_channel(x);
+                let y = Rgba::linear_channel(y);
+                x + (y - x) * u
+            };
+            [ch(a.r, b.r), ch(a.g, b.g), ch(a.b, b.b)]
+        };
+        if t <= first.at {
+            return to_linear(first.color);
+        }
+        let mut prev = first;
+        for stop in self.stops.iter().skip(1) {
+            if t <= stop.at {
+                let span = (stop.at - prev.at).max(f64::EPSILON);
+                return mix_into(prev.color, stop.color, (t - prev.at) / span);
+            }
+            prev = stop;
+        }
+        to_linear(prev.color)
+    }
+
+    /// The colour at position `t`, quantised to 8 bits and clamped at the ends.
+    pub fn sample(&self, t: f64) -> Rgba {
+        let lin = self.sample_linear(t);
+        Rgba::from_linear(lin[0], lin[1], lin[2])
+    }
+
+    /// Where a pixel sits along the gradient, for a box in canvas pixels.
+    pub fn project(&self, px: f64, py: f64, bx: f64, by: f64, bw: f64, bh: f64) -> f64 {
+        self.projector(bx, by, bw, bh).at(px, py)
+    }
+
+    /// A projector precomputes the trigonometry once, so a per-pixel loop does not call
+    /// `cos` two million times.
+    pub fn projector(&self, bx: f64, by: f64, bw: f64, bh: f64) -> Projector {
+        let a = self.angle.to_radians();
+        Projector {
+            cx: bx + bw / 2.0,
+            cy: by + bh / 2.0,
+            dx: a.cos(),
+            dy: -a.sin(),
+            span: (bw * a.cos()).abs() + (bh * a.sin()).abs(),
+            radius: bw.min(bh) / 2.0,
+            radial: matches!(self.kind, GradientKind::Radial),
+        }
+    }
+
+    pub fn validate(&self) -> Option<String> {
+        if self.stops.len() < 2 {
+            return Some("a gradient needs at least two stops".into());
+        }
+        let mut last = f64::NEG_INFINITY;
+        for s in &self.stops {
+            if !(0.0..=1.0).contains(&s.at) {
+                return Some("stop positions are between 0 and 1".into());
+            }
+            if s.at < last {
+                return Some("stops must be ordered by position".into());
+            }
+            last = s.at;
+        }
+        None
+    }
+}
+
+/// Precomputed geometry for sampling a gradient across a box.
+#[derive(Debug, Clone, Copy)]
+pub struct Projector {
+    cx: f64,
+    cy: f64,
+    dx: f64,
+    dy: f64,
+    span: f64,
+    radius: f64,
+    radial: bool,
+}
+
+impl Projector {
+    pub fn at(&self, px: f64, py: f64) -> f64 {
+        if self.radial {
+            if self.radius <= 0.0 {
+                return 0.0;
+            }
+            return (((px - self.cx).powi(2) + (py - self.cy).powi(2)).sqrt() / self.radius)
+                .clamp(0.0, 1.0);
+        }
+        if self.span <= f64::EPSILON {
+            return 0.0;
+        }
+        (0.5 + ((px - self.cx) * self.dx + (py - self.cy) * self.dy) / self.span).clamp(0.0, 1.0)
+    }
+}
+
+fn to_linear(c: Rgba) -> [f64; 3] {
+    [
+        Rgba::linear_channel(c.r),
+        Rgba::linear_channel(c.g),
+        Rgba::linear_channel(c.b),
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -515,6 +661,7 @@ impl Doc {
                 blend: Blend::Normal,
                 solid: Some(Solid {
                     color: Rgba::opaque(0x0b, 0x0d, 0x12),
+                    gradient: None,
                 }),
                 text: None,
                 shape: None,
@@ -556,6 +703,7 @@ impl Doc {
                     size: [420.0, 8.0],
                     color: Rgba::opaque(0x4c, 0x8f, 0xff),
                     radius: 4.0,
+                    gradient: None,
                 }),
                 mattes: None,
                 modifiers: vec![],
@@ -797,6 +945,16 @@ impl Doc {
                 if l.kind == LayerKind::Shape && l.shape.is_none() {
                     out.push(format!("shape layer `{}` has no shape block", l.id));
                 }
+                if let Some(g) = l.solid.as_ref().and_then(|s| s.gradient.as_ref()) {
+                    if let Some(e) = g.validate() {
+                        out.push(format!("layer `{}` solid gradient: {e}", l.id));
+                    }
+                }
+                if let Some(g) = l.shape.as_ref().and_then(|s| s.gradient.as_ref()) {
+                    if let Some(e) = g.validate() {
+                        out.push(format!("layer `{}` shape gradient: {e}", l.id));
+                    }
+                }
             }
         }
         out
@@ -872,6 +1030,71 @@ mod tests {
             (one[1] - t.size * 1.2).abs() < t.size * 0.25,
             "a line is about its em box tall"
         );
+    }
+
+    fn bw_gradient() -> Gradient {
+        Gradient {
+            kind: GradientKind::Linear,
+            angle: 0.0,
+            stops: vec![
+                Stop {
+                    at: 0.0,
+                    color: Rgba::BLACK,
+                },
+                Stop {
+                    at: 1.0,
+                    color: Rgba::WHITE,
+                },
+            ],
+            dither: false,
+        }
+    }
+
+    #[test]
+    fn a_gradient_mixes_in_linear_light_and_clamps() {
+        let g = bw_gradient();
+        assert_eq!(g.sample(-1.0), Rgba::BLACK);
+        assert_eq!(g.sample(2.0), Rgba::WHITE);
+        let mid = g.sample(0.5);
+        // Half way in linear light is sRGB ~188, not 128: mixing gamma-encoded values is the
+        // mistake that makes black-to-white go grey.
+        assert!(mid.r > 170 && mid.r < 200, "mid was {}", mid.r);
+        let lin = g.sample_linear(0.5);
+        assert!(
+            (lin[0] - 0.5).abs() < 0.01,
+            "linear mid is 0.5, got {}",
+            lin[0]
+        );
+    }
+
+    #[test]
+    fn gradients_reject_stops_that_cannot_be_drawn() {
+        let mut g = bw_gradient();
+        g.stops.truncate(1);
+        assert!(g.validate().is_some());
+        let mut g = bw_gradient();
+        g.stops[0].at = 0.6;
+        g.stops[1].at = 0.2;
+        assert!(g.validate().unwrap().contains("ordered"));
+        let mut g = bw_gradient();
+        g.stops[1].at = 1.4;
+        assert!(g.validate().unwrap().contains("between 0 and 1"));
+        assert!(bw_gradient().validate().is_none());
+    }
+
+    #[test]
+    fn a_gradient_projects_across_its_box_in_the_stated_direction() {
+        let g = bw_gradient();
+        let left = g.project(0.0, 50.0, 0.0, 0.0, 100.0, 100.0);
+        let right = g.project(100.0, 50.0, 0.0, 0.0, 100.0, 100.0);
+        assert!(left < 0.05 && right > 0.95, "{left} {right}");
+        // 90 degrees runs upwards, and y grows downwards, so the bottom is the start.
+        let up = Gradient {
+            angle: 90.0,
+            ..g.clone()
+        };
+        assert!(up.project(50.0, 100.0, 0.0, 0.0, 100.0, 100.0) < 0.05);
+        assert!(up.project(50.0, 0.0, 0.0, 0.0, 100.0, 100.0) > 0.95);
     }
 
     #[test]

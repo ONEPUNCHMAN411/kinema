@@ -169,10 +169,11 @@ fn capabilities() -> Value {
             {"code": "HOLD-NONE", "severity": "warn", "detects": "no still moment in over three seconds", "fix": false},
             {"code": "STAGGER", "severity": "warn", "detects": "more than 70% of layers entering on one frame", "fix": true},
             {"code": "TYPE-SCALE", "severity": "warn", "detects": "a size off the modular scale, or more than four sizes", "fix": true},
-            {"code": "LOOK-DRIFT", "severity": "warn", "detects": "a chromatic colour more than 25 degrees from the look's accent hue", "fix": true}
+            {"code": "LOOK-DRIFT", "severity": "warn", "detects": "a chromatic colour more than 25 degrees from the look's accent hue", "fix": true},
+            {"code": "BANDING", "severity": "warn", "detects": "a ramp holding one colour for more than 16 px with dither off", "fix": true}
         ],
         "checks_advisory": {"HOLD-NONE": "the remedy is which beat to hold; the hint names it, the engine will not pick"},
-        "checks_pending": ["CUT-TIMING", "JUMPCUT", "BANDING", "LOUD"],
+        "checks_pending": ["CUT-TIMING", "JUMPCUT", "LOUD"],
         "text_anim": {
             "types": ["reveal", "rise"],
             "units": ["char", "word", "line"],

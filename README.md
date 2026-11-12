@@ -97,8 +97,13 @@ pairing with a stated reason plus a role assignment. `TYPE-SCALE` closes the loo
 off the scale is a defect with the step to snap to, and more than four sizes is reported
 with no remedy, because choosing which size to drop is a directing call.
 
-Detectors live in this build: `TYPE-FAKE`, `TYPE-SCALE`, `READ`, `CHROMA`, `PALETTE`,
-`EASE-FLAT`, `SHUTTER`, `HOLD-NONE` and `STAGGER`. All but `HOLD-NONE` ship a `fix_op`, and `kin check --fix`
+Solids and shapes take a gradient (`set-gradient`, linear or radial, with stops), mixed
+in linear light and optionally dithered. A ramp that holds one colour for more than 16 px
+is a `BANDING` defect whose `fix_op` turns dithering on — measured, not assumed: the demo
+ramp that trips it holds one colour for 92 px of a 1920 px span.
+
+Detectors live in this build: `TYPE-FAKE`, `TYPE-SCALE`, `LOOK-DRIFT`, `BANDING`, `READ`,
+`CHROMA`, `PALETTE`, `EASE-FLAT`, `SHUTTER`, `HOLD-NONE` and `STAGGER`. All but `HOLD-NONE` ship a `fix_op`, and `kin check --fix`
 applies them to a fixpoint: remedies are measured against one snapshot, so CHROMA's
 remedy and READ's can disagree, and only re-measuring after each step settles it. The
 remaining detectors are specified with their thresholds in `docs/PLAN.md` and land with

@@ -3,7 +3,7 @@
 //! Every mutation is an `Op` that can be inverted, so the journal gives undo, diff and
 //! provenance for free. A path looks like `comp:main/layer:title/transform.position`.
 
-use crate::model::{Asset, Layer, Look};
+use crate::model::{Asset, Gradient, Layer, Look};
 use crate::{Doc, DocError, Prop};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -51,6 +51,17 @@ pub enum Op {
         #[serde(default)]
         reason: String,
     },
+    /// Give a layer's solid or shape a ramp, replacing any it had.
+    SetGradient {
+        comp: String,
+        layer: String,
+        /// `solid` or `shape`.
+        on: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gradient: Option<Gradient>,
+        #[serde(default)]
+        reason: String,
+    },
     /// Replace the document's look, or clear it with `"look": null`.
     SetLook {
         #[serde(default)]
@@ -69,7 +80,8 @@ impl Op {
             | Op::SetComp { reason, .. }
             | Op::SetAsset { reason, .. }
             | Op::RemoveAsset { reason, .. }
-            | Op::SetLook { reason, .. } => reason,
+            | Op::SetLook { reason, .. }
+            | Op::SetGradient { reason, .. } => reason,
         }
     }
 
@@ -82,6 +94,7 @@ impl Op {
             Op::SetAsset { .. } => "set-asset",
             Op::RemoveAsset { .. } => "remove-asset",
             Op::SetLook { .. } => "set-look",
+            Op::SetGradient { .. } => "set-gradient",
         }
     }
 }
@@ -235,6 +248,35 @@ fn inverse_of(before: &Doc, op: &Op) -> Result<Option<Op>, DocError> {
             look: before.look.clone(),
             reason: format!("undo of: {reason}"),
         })),
+        Op::SetGradient {
+            comp,
+            layer,
+            on,
+            reason,
+            ..
+        } => {
+            let c = before.comp(comp)?;
+            let l = c
+                .layers
+                .iter()
+                .find(|l| &l.id == layer)
+                .ok_or_else(|| DocError::NotFound {
+                    path: format!("comp:{comp}/layer:{layer}"),
+                    hint: "check the layer id".to_string(),
+                })?;
+            let previous = match on.as_str() {
+                "solid" => l.solid.as_ref().and_then(|s| s.gradient.clone()),
+                "shape" => l.shape.as_ref().and_then(|s| s.gradient.clone()),
+                _ => None,
+            };
+            Ok(Some(Op::SetGradient {
+                comp: comp.clone(),
+                layer: layer.clone(),
+                on: on.clone(),
+                gradient: previous,
+                reason: format!("undo of: {reason}"),
+            }))
+        }
     }
 }
 
@@ -320,6 +362,43 @@ impl Doc {
             Op::SetLook { look, .. } => {
                 self.look = look.clone();
             }
+            Op::SetGradient {
+                comp,
+                layer,
+                on,
+                gradient,
+                ..
+            } => {
+                let c = self.comps.get_mut(comp).ok_or_else(|| DocError::NotFound {
+                    path: format!("comp:{comp}"),
+                    hint: "check the comp id".to_string(),
+                })?;
+                let l = c
+                    .layers
+                    .iter_mut()
+                    .find(|l| &l.id == layer)
+                    .ok_or_else(|| DocError::NotFound {
+                        path: format!("comp:{comp}/layer:{layer}"),
+                        hint: "check the layer id".to_string(),
+                    })?;
+                let slot = match on.as_str() {
+                    "solid" => l.solid.as_mut().map(|s| &mut s.gradient),
+                    "shape" => l.shape.as_mut().map(|s| &mut s.gradient),
+                    other => {
+                        return Err(DocError::Invalid {
+                            code: "bad-target",
+                            message: format!("`{other}` is not `solid` or `shape`"),
+                            hint: "target `solid` or `shape`".to_string(),
+                        })
+                    }
+                };
+                let slot = slot.ok_or_else(|| DocError::Invalid {
+                    code: "no-block",
+                    message: format!("layer `{layer}` has no {on} block"),
+                    hint: format!("give the layer a {on} block first"),
+                })?;
+                *slot = gradient.clone();
+            }
         }
         self.version += 1;
         Ok(AppliedResult {
@@ -358,7 +437,10 @@ pub fn op_schema() -> Value {
              "properties": {"op": {"const": "remove-asset"}, "asset": {"type": "string"}, "reason": {"type": "string"}}},
             {"type": "object", "required": ["op"],
              "properties": {"op": {"const": "set-look"}, "look": {"type": ["object", "null"]}, "reason": {"type": "string"}},
-             "examples": [{"op": "set-look", "look": {"accent": "#4c8fff", "scheme": "dark", "scale": {"base": 16, "ratio": 1.25}}, "reason": "one accent for the whole project"}]}
+             "examples": [{"op": "set-look", "look": {"accent": "#4c8fff", "scheme": "dark", "scale": {"base": 16, "ratio": 1.25}}, "reason": "one accent for the whole project"}]},
+            {"type": "object", "required": ["op", "comp", "layer", "on"],
+             "properties": {"op": {"const": "set-gradient"}, "comp": {"type": "string"}, "layer": {"type": "string"}, "on": {"enum": ["solid", "shape"]}, "gradient": {"type": ["object", "null"]}, "reason": {"type": "string"}},
+             "examples": [{"op": "set-gradient", "comp": "main", "layer": "bg", "on": "solid", "gradient": {"kind": "linear", "angle": 90, "dither": true, "stops": [{"at": 0, "color": "#0a0e18"}, {"at": 1, "color": "#1b2a4a"}]}, "reason": "a ground with depth"}]}
         ]
     })
 }
@@ -509,6 +591,50 @@ mod tests {
         assert_eq!(look.scale.base, 14.0);
         doc.apply(&res.inverse.unwrap()).unwrap();
         assert_eq!(doc.look, before, "undo restores the previous look");
+    }
+
+    #[test]
+    fn a_gradient_can_be_set_and_undone() {
+        let mut doc = Doc::starter();
+        let op: Op = serde_json::from_value(json!({
+            "op": "set-gradient", "comp": "main", "layer": "bg", "on": "solid",
+            "gradient": {"kind": "linear", "angle": 90, "dither": true,
+                         "stops": [{"at": 0.0, "color": "#000000"}, {"at": 1.0, "color": "#ffffff"}]},
+            "reason": "test"
+        }))
+        .unwrap();
+        let res = doc.apply(&op).unwrap();
+        let g = doc.comps["main"].layers[0]
+            .solid
+            .as_ref()
+            .unwrap()
+            .gradient
+            .clone()
+            .expect("gradient set");
+        assert!(g.dither);
+        assert_eq!(g.stops.len(), 2);
+        doc.apply(&res.inverse.unwrap()).unwrap();
+        assert!(
+            doc.comps["main"].layers[0]
+                .solid
+                .as_ref()
+                .unwrap()
+                .gradient
+                .is_none(),
+            "undo removes a gradient that was not there before"
+        );
+    }
+
+    #[test]
+    fn a_gradient_on_the_wrong_block_is_refused() {
+        let mut doc = Doc::starter();
+        let op: Op = serde_json::from_value(json!({
+            "op": "set-gradient", "comp": "main", "layer": "title", "on": "solid",
+            "gradient": {"stops": [{"at": 0.0, "color": "#000000"}, {"at": 1.0, "color": "#ffffff"}]},
+            "reason": "test"
+        }))
+        .unwrap();
+        assert_eq!(doc.apply(&op).unwrap_err().to_json()["code"], "no-block");
     }
 
     #[test]

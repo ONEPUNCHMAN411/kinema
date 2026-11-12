@@ -201,6 +201,119 @@ impl Canvas {
         }
     }
 
+    /// A rectangle filled with a ramp.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fill_rect_gradient(
+        &mut self,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        g: &kinema_doc::Gradient,
+        alpha: f64,
+        mode: Blend,
+    ) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let x0 = x.floor().max(0.0) as u32;
+        let y0 = y.floor().max(0.0) as u32;
+        let x1 = ((x + w).ceil() as i64).clamp(0, self.width as i64) as u32;
+        let y1 = ((y + h).ceil() as i64).clamp(0, self.height as i64) as u32;
+        let proj = g.projector(x, y, w, h);
+
+        // An opaque normal-blend ramp over the whole canvas writes straight into the
+        // buffer: coverage is 1 everywhere, so compositing would only multiply by one.
+        //
+        // The ramp is tabulated first because the sRGB transfer is a `powf`: evaluated per
+        // pixel per subframe it dominates the frame. 2048 entries across the whole ramp is
+        // finer than 8-bit output can show, so the table costs nothing visually.
+        if matches!(mode, Blend::Normal)
+            && alpha >= 1.0
+            && x0 == 0
+            && y0 == 0
+            && x1 >= self.width
+            && y1 >= self.height
+        {
+            const LUT: usize = 2048;
+            let table: Vec<[f64; 3]> = (0..LUT)
+                .map(|i| {
+                    let lin = g.sample_linear(i as f64 / (LUT - 1) as f64);
+                    [
+                        Rgba::srgb_from_linear(lin[0]),
+                        Rgba::srgb_from_linear(lin[1]),
+                        Rgba::srgb_from_linear(lin[2]),
+                    ]
+                })
+                .collect();
+            for py in 0..self.height {
+                for px in 0..self.width {
+                    let t = proj.at(px as f64 + 0.5, py as f64 + 0.5);
+                    let idx = ((t * (LUT - 1) as f64).round() as usize).min(LUT - 1);
+                    let entry = table[idx];
+                    let bias = if g.dither {
+                        BAYER4[(py % 4) as usize][(px % 4) as usize] / 16.0 - 0.5
+                    } else {
+                        0.0
+                    };
+                    let o = ((py * self.width + px) * 4) as usize;
+                    self.data[o] = quantise(entry[0] * 255.0 + bias);
+                    self.data[o + 1] = quantise(entry[1] * 255.0 + bias);
+                    self.data[o + 2] = quantise(entry[2] * 255.0 + bias);
+                    self.data[o + 3] = 255;
+                }
+            }
+            return;
+        }
+
+        for py in y0..y1 {
+            let cy = ((py as f64 + 1.0).min(y + h) - (py as f64).max(y)).max(0.0);
+            for px in x0..x1 {
+                let cx = ((px as f64 + 1.0).min(x + w) - (px as f64).max(x)).max(0.0);
+                let coverage = cx.min(1.0) * cy.min(1.0);
+                let t = proj.at(px as f64 + 0.5, py as f64 + 0.5);
+                self.composite(px, py, shaded(g, t, px, py), coverage * alpha, mode);
+            }
+        }
+    }
+
+    /// An ellipse filled with a ramp, radially masked like `fill_ellipse`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fill_ellipse_gradient(
+        &mut self,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        g: &kinema_doc::Gradient,
+        alpha: f64,
+        mode: Blend,
+    ) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let (rx, ry) = (w / 2.0, h / 2.0);
+        let (cx, cy) = (x + rx, y + ry);
+        let x0 = x.floor().max(0.0) as u32;
+        let y0 = y.floor().max(0.0) as u32;
+        let x1 = ((x + w).ceil() as i64).clamp(0, self.width as i64) as u32;
+        let y1 = ((y + h).ceil() as i64).clamp(0, self.height as i64) as u32;
+        let edge = rx.min(ry).max(1.0);
+        for py in y0..y1 {
+            for px in x0..x1 {
+                let dx = (px as f64 + 0.5 - cx) / rx;
+                let dy = (py as f64 + 0.5 - cy) / ry;
+                let d = (dx * dx + dy * dy).sqrt();
+                let coverage = ((1.0 - d) * edge + 0.5).clamp(0.0, 1.0);
+                if coverage <= 0.0 {
+                    continue;
+                }
+                let t = g.project(px as f64 + 0.5, py as f64 + 0.5, x, y, w, h);
+                self.composite(px, py, shaded(g, t, px, py), coverage * alpha, mode);
+            }
+        }
+    }
+
     /// Draw a block of lines inside a box with a bundled face, honouring alignment and
     /// the block's own staggered entrance.
     ///
@@ -281,6 +394,38 @@ impl Canvas {
         }
         Ok(buf)
     }
+}
+
+/// A 4x4 ordered dither matrix, in sixteenths.
+const BAYER4: [[f64; 4]; 4] = [
+    [0.0, 8.0, 2.0, 10.0],
+    [12.0, 4.0, 14.0, 6.0],
+    [3.0, 11.0, 1.0, 9.0],
+    [15.0, 7.0, 13.0, 5.0],
+];
+
+/// The ramp colour at `t`, with the ordered-dither bias applied when the gradient asks for
+/// it. Dithering trades a visible step for invisible noise, which is the correct trade at 8
+/// bits per channel.
+fn quantise(v: f64) -> u8 {
+    v.round().clamp(0.0, 255.0) as u8
+}
+
+fn shaded(g: &kinema_doc::Gradient, t: f64, px: u32, py: u32) -> Rgba {
+    let lin = g.sample_linear(t);
+    // The bias has to land before rounding, on the unquantised sRGB value: adding it to an
+    // 8-bit number can only ever return that same number.
+    let bias = if g.dither {
+        BAYER4[(py % 4) as usize][(px % 4) as usize] / 16.0 - 0.5
+    } else {
+        0.0
+    };
+    let ch = |v: f64| {
+        (kinema_doc::Rgba::srgb_from_linear(v) * 255.0 + bias)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Rgba::opaque(ch(lin[0]), ch(lin[1]), ch(lin[2]))
 }
 
 #[derive(Debug)]
@@ -369,26 +514,32 @@ fn draw_at(
         let (bx, by, bw, bh) = (bx * scale, by * scale, bw * scale, bh * scale);
         match layer.kind {
             LayerKind::Solid => {
-                let color = layer.solid.as_ref().map(|s| s.color).unwrap_or(Rgba::BLACK);
-                canvas.fill_rect(
-                    0.0,
-                    0.0,
-                    canvas.width as f64,
-                    canvas.height as f64,
-                    color,
-                    alpha,
-                    layer.blend,
-                );
+                let (color, gradient) = match &layer.solid {
+                    Some(s) => (s.color, s.gradient.as_ref()),
+                    None => (Rgba::BLACK, None),
+                };
+                let (w, h) = (canvas.width as f64, canvas.height as f64);
+                match gradient {
+                    Some(g) => canvas.fill_rect_gradient(0.0, 0.0, w, h, g, alpha, layer.blend),
+                    None => canvas.fill_rect(0.0, 0.0, w, h, color, alpha, layer.blend),
+                }
             }
             LayerKind::Shape => {
                 let Some(shape) = &layer.shape else {
                     skipped.insert(layer.id.clone());
                     continue;
                 };
-                if shape.kind == kinema_doc::ShapeKind::Ellipse {
-                    canvas.fill_ellipse(bx, by, bw, bh, shape.color, alpha, layer.blend);
-                } else {
-                    canvas.fill_rect(bx, by, bw, bh, shape.color, alpha, layer.blend);
+                match (&shape.gradient, shape.kind) {
+                    (Some(g), kinema_doc::ShapeKind::Ellipse) => {
+                        canvas.fill_ellipse_gradient(bx, by, bw, bh, g, alpha, layer.blend)
+                    }
+                    (Some(g), _) => {
+                        canvas.fill_rect_gradient(bx, by, bw, bh, g, alpha, layer.blend)
+                    }
+                    (None, kinema_doc::ShapeKind::Ellipse) => {
+                        canvas.fill_ellipse(bx, by, bw, bh, shape.color, alpha, layer.blend)
+                    }
+                    (None, _) => canvas.fill_rect(bx, by, bw, bh, shape.color, alpha, layer.blend),
                 }
             }
             LayerKind::Text => {
@@ -543,6 +694,98 @@ mod tests {
         let solid = c.layers[0].solid.as_ref().unwrap();
         canvas.fill_rect(0.0, 0.0, 64.0, 64.0, solid.color, 1.0, Blend::Normal);
         assert_eq!(canvas.get(10, 10), solid.color);
+    }
+
+    fn low_contrast_ramp(dither: bool) -> kinema_doc::Gradient {
+        kinema_doc::Gradient {
+            kind: kinema_doc::GradientKind::Linear,
+            angle: 0.0,
+            stops: vec![
+                kinema_doc::Stop {
+                    at: 0.0,
+                    color: Rgba::opaque(0x10, 0x12, 0x18),
+                },
+                kinema_doc::Stop {
+                    at: 1.0,
+                    color: Rgba::opaque(0x16, 0x18, 0x20),
+                },
+            ],
+            dither,
+        }
+    }
+
+    #[test]
+    fn dithering_breaks_the_bands_in_a_ramp() {
+        let longest_run = |canvas: &Canvas| {
+            let (mut run, mut best) = (1usize, 1usize);
+            let mut prev = canvas.get(0, 0);
+            for x in 1..canvas.width {
+                let px = canvas.get(x, 0);
+                if px == prev {
+                    run += 1;
+                } else {
+                    run = 1;
+                    prev = px;
+                }
+                best = best.max(run);
+            }
+            best
+        };
+        let mut plain = Canvas::new(800, 4);
+        plain.fill_rect_gradient(
+            0.0,
+            0.0,
+            800.0,
+            4.0,
+            &low_contrast_ramp(false),
+            1.0,
+            Blend::Normal,
+        );
+        let mut dithered = Canvas::new(800, 4);
+        dithered.fill_rect_gradient(
+            0.0,
+            0.0,
+            800.0,
+            4.0,
+            &low_contrast_ramp(true),
+            1.0,
+            Blend::Normal,
+        );
+        assert!(
+            longest_run(&plain) > 32,
+            "the undithered ramp should show long flat runs, got {}",
+            longest_run(&plain)
+        );
+        assert!(
+            longest_run(&dithered) < longest_run(&plain) / 2,
+            "dithering should break the runs: {} vs {}",
+            longest_run(&dithered),
+            longest_run(&plain)
+        );
+    }
+
+    #[test]
+    fn a_radial_gradient_darkens_outwards() {
+        let mut canvas = Canvas::new(200, 200);
+        let g = kinema_doc::Gradient {
+            kind: kinema_doc::GradientKind::Radial,
+            angle: 0.0,
+            stops: vec![
+                kinema_doc::Stop {
+                    at: 0.0,
+                    color: Rgba::WHITE,
+                },
+                kinema_doc::Stop {
+                    at: 1.0,
+                    color: Rgba::BLACK,
+                },
+            ],
+            dither: false,
+        };
+        canvas.fill_ellipse_gradient(0.0, 0.0, 200.0, 200.0, &g, 1.0, Blend::Normal);
+        assert!(canvas.get(100, 100).r > 240, "centre is the first stop");
+        assert!(canvas.get(2, 100).r < 80, "the rim is the last stop");
+        assert!(canvas.get(0, 0).a == 0, "outside the ellipse stays clear");
     }
 
     #[test]

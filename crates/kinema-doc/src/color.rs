@@ -51,6 +51,28 @@ impl Rgba {
         }
     }
 
+    /// The sRGB transfer function, linear to display, unquantised (0 to 1).
+    ///
+    /// Quantisation has to be the *last* thing that happens, or dithering has nothing to
+    /// work with: a bias applied to an already-rounded value can only ever return it.
+    pub fn srgb_from_linear(v: f64) -> f64 {
+        let v = v.clamp(0.0, 1.0);
+        if v <= 0.003_130_8 {
+            12.92 * v
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
+    /// Build a colour from linear-light channels, encoding through the sRGB transfer.
+    ///
+    /// Ramp interpolation happens in linear light: mixing two sRGB values directly is what
+    /// makes a black-to-white gradient go grey in the middle rather than bright.
+    pub fn from_linear(r: f64, g: f64, b: f64) -> Rgba {
+        let enc = |v: f64| -> u8 { (Self::srgb_from_linear(v) * 255.0).round() as u8 };
+        Rgba::opaque(enc(r), enc(g), enc(b))
+    }
+
     /// sRGB EOTF: decode one channel to linear light.
     pub fn linear_channel(c: u8) -> f64 {
         let v = c as f64 / 255.0;

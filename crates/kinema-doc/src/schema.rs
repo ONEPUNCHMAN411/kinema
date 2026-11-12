@@ -45,6 +45,28 @@ pub fn doc_schema() -> Value {
             }
         },
         "$defs": {
+            "gradient": {
+                "type": "object",
+                "description": "a ramp, interpolated in linear light",
+                "required": ["stops"],
+                "properties": {
+                    "kind": {"enum": ["linear", "radial"]},
+                    "angle": {"type": "number", "description": "degrees; 0 runs left to right"},
+                    "dither": {"type": "boolean", "description": "ordered dither, which breaks 8-bit banding"},
+                    "stops": {
+                        "type": "array",
+                        "minItems": 2,
+                        "items": {
+                            "type": "object",
+                            "required": ["at", "color"],
+                            "properties": {
+                                "at": {"type": "number", "minimum": 0, "maximum": 1},
+                                "color": {"$ref": "#/$defs/colour"}
+                            }
+                        }
+                    }
+                }
+            },
             "rational": {
                 "type": "array", "minItems": 2, "maxItems": 2,
                 "items": {"type": "integer"},
@@ -95,7 +117,7 @@ pub fn doc_schema() -> Value {
                     },
                     "opacity": {"$ref": "#/$defs/prop"},
                     "blend": {"enum": ["normal", "screen", "multiply", "overlay", "add"]},
-                    "solid": {"type": "object", "properties": {"color": {"$ref": "#/$defs/colour"}}},
+                    "solid": {"type": "object", "properties": {"color": {"$ref": "#/$defs/colour"}, "gradient": {"$ref": "#/$defs/gradient"}}},
                     "text": {
                         "type": "object",
                         "required": ["string", "size", "color"],
@@ -131,7 +153,8 @@ pub fn doc_schema() -> Value {
                             "kind": {"enum": ["rect", "ellipse"]},
                             "size": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}},
                             "color": {"$ref": "#/$defs/colour"},
-                            "radius": {"type": "number"}
+                            "radius": {"type": "number"},
+                            "gradient": {"$ref": "#/$defs/gradient"}
                         }
                     },
                     "mattes": {"type": "object", "properties": {

@@ -196,7 +196,7 @@ measurable. Each gate is an `assert` with a `fix_op`.
 | TYPE-FAKE | synthesised italic/bold/small caps, or a system fallback face | **P0** |
 | PALETTE | out-of-Rec.709 colours, multiple accents, rainbow gradients | **P0** (accents) |
 | CHROMA | saturated text <32 px on saturated ground; 4:2:0 destroys it | **P0** |
-| BANDING | flat gradient >2% of frame, <2 codes/100 px, no dither | P3 |
+| BANDING | flat gradient >2% of frame, <2 codes/100 px, no dither | **P0** (dither) |
 | READ | contrast <4.5:1, outside title-safe, over busy unprotected area | **P0** (contrast) |
 | LOUD | dialogue off −14/−16 LUFS, bed >−6 LU under, ducking or TP wrong | P5 |
 
