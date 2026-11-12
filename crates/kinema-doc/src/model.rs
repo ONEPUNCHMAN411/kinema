@@ -272,7 +272,7 @@ pub struct Modifier {
     pub params: serde_json::Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Asset {
     pub id: String,
     pub kind: String,
@@ -285,7 +285,7 @@ pub struct Asset {
 }
 
 /// Licence is data, never a guess. `unknown` blocks a release render.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Licence {
     pub spdx: String,
     pub source_url: String,

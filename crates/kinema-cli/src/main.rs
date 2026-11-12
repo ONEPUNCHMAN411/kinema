@@ -22,13 +22,29 @@ fn main() {
     let pretty = has(&argv, "--pretty");
     match dispatch(&argv) {
         Ok(v) => {
-            print_json(&v, pretty);
+            print_json(&project_fields(v, &argv), pretty);
         }
         Err(e) => {
             print_json(&e, pretty);
             std::process::exit(1);
         }
     }
+}
+
+/// `--fields a,b` keeps only the named top-level keys, for token economy. Errors are
+/// never projected: an agent needs `code`, `hint` and `fix_op` whatever it asked for.
+fn project_fields(v: Value, argv: &[String]) -> Value {
+    let Some(spec) = get(argv, "--fields") else {
+        return v;
+    };
+    let Value::Object(map) = v else { return v };
+    let mut out = serde_json::Map::new();
+    for key in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(value) = map.get(key) {
+            out.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(out)
 }
 
 fn print_json(v: &Value, pretty: bool) {
@@ -60,6 +76,7 @@ fn dispatch(argv: &[String]) -> R {
         "log" => cmd_log(argv),
         "undo" => cmd_undo(argv),
         "verify" => cmd_verify(argv),
+        "diff" => cmd_diff(argv),
         "asset" | "assets" => cmd_asset(argv),
         other => Err(not_implemented(other)),
     }
@@ -127,6 +144,7 @@ fn capabilities() -> Value {
             {"name": "asset add", "summary": "record an asset, its digest and its licence", "args": ["<file>", "--spdx <id>", "--source-url <url>", "--author <name>", "--kind <kind>", "--id <id>"]},
             {"name": "undo", "summary": "replay the journal's inverses", "args": ["--steps <n>", "--dry-run"]},
             {"name": "verify", "summary": "check a sequence manifest against disk, and with --render against a fresh render", "args": ["--manifest <file>", "--render"]},
+            {"name": "diff", "summary": "what changed since a document, and which frames it invalidates", "args": ["--from <doc.json>", "--comp <id>"]},
             {"name": "log", "summary": "the op journal", "args": []}
         ],
         "licences": ["cc0-1.0", "cc-by-4.0", "cc-by-sa-4.0", "cc-by-nc-4.0", "cc-by-nd-4.0", "mit", "apache-2.0", "bsd-3-clause", "ofl-1.1", "unknown"],
@@ -161,6 +179,7 @@ fn capabilities() -> Value {
         "fonts": checks::BUNDLED_FONTS,
         "weights": checks::BUNDLED_WEIGHTS,
         "path_syntax": "comp:main/layer:title/transform.position",
+        "projection": "every verb accepts --fields a,b to keep only those top-level keys",
         "error_contract": {"code": "string", "message": "string", "hint": "string", "fix_op": "op|null", "doc": "string"},
         "stateless": "every verb reads the project and writes it back; `--expect-version` gives compare-and-swap for parallel agents",
     })
@@ -711,6 +730,151 @@ fn render_sequence(argv: &[String], spec: &str) -> R {
 
 /// Check a sequence manifest against the files on disk, and with `--render`, against a
 /// fresh render. The second is the reproducibility claim: same document, same pixels.
+/// What a document change actually costs: which layers moved, and how many frames the
+/// renderer will have to draw again.
+fn cmd_diff(argv: &[String]) -> R {
+    let project = Project::open(argv)?;
+    let after = project.load()?;
+    let base_path = get(argv, "--from")
+        .ok_or_else(|| usage("pass --from <doc.json>; the working document is the other side"))?;
+    let src = fs::read_to_string(base_path).map_err(|e| io_err(Path::new(base_path), &e))?;
+    let before = Doc::parse(&src).map_err(|e| doc_err(&e))?;
+    let comp = get(argv, "--comp").unwrap_or("main").to_string();
+
+    let mut layers_changed = Vec::new();
+    let mut comps_changed = Vec::new();
+    for (id, b) in &before.comps {
+        match after.comps.get(id) {
+            None => comps_changed.push(json!({ "comp": id, "change": "removed" })),
+            Some(a) => {
+                let mut fields = Vec::new();
+                if a.size != b.size {
+                    fields.push("size");
+                }
+                if a.duration != b.duration {
+                    fields.push("duration");
+                }
+                if a.shutter != b.shutter {
+                    fields.push("shutter");
+                }
+                if a.samples != b.samples {
+                    fields.push("samples");
+                }
+                if !fields.is_empty() {
+                    comps_changed
+                        .push(json!({ "comp": id, "change": "changed", "fields": fields }));
+                }
+                for bl in &b.layers {
+                    match a.layers.iter().find(|l| l.id == bl.id) {
+                        None => layers_changed.push(json!({
+                            "comp": id, "layer": bl.id, "change": "removed"
+                        })),
+                        Some(al) => {
+                            let fields = differing_fields(
+                                &serde_json::to_value(bl).unwrap_or(Value::Null),
+                                &serde_json::to_value(al).unwrap_or(Value::Null),
+                            );
+                            if !fields.is_empty() {
+                                layers_changed.push(json!({
+                                    "comp": id, "layer": al.id, "change": "changed", "fields": fields
+                                }));
+                            }
+                        }
+                    }
+                }
+                for al in &a.layers {
+                    if !b.layers.iter().any(|l| l.id == al.id) {
+                        layers_changed.push(json!({
+                            "comp": id, "layer": al.id, "change": "added"
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    for id in after.comps.keys() {
+        if !before.comps.contains_key(id) {
+            comps_changed.push(json!({ "comp": id, "change": "added" }));
+        }
+    }
+
+    let total = after.frame_count(&comp).unwrap_or(0);
+    let invalidated = (0..total)
+        .filter(|f| {
+            deps::hash_frame(&before, &comp, *f, "diff")
+                != deps::hash_frame(&after, &comp, *f, "diff")
+        })
+        .count();
+
+    let assets_changed: Vec<Value> = after
+        .assets
+        .iter()
+        .filter(|(id, a)| before.assets.get(*id).map(|b| b != *a).unwrap_or(true))
+        .map(|(id, _)| json!({ "asset": id, "change": "changed" }))
+        .chain(
+            before
+                .assets
+                .keys()
+                .filter(|id| !after.assets.contains_key(*id))
+                .map(|id| json!({ "asset": id, "change": "removed" })),
+        )
+        .collect();
+
+    Ok(json!({
+        "ok": true,
+        "comp": comp,
+        "doc_hash_before": deps::hash_doc(&before),
+        "doc_hash_after": deps::hash_doc(&after),
+        "same": deps::hash_doc(&before) == deps::hash_doc(&after),
+        "comps": comps_changed,
+        "layers": layers_changed,
+        "assets": assets_changed,
+        "frames_total": total,
+        "frames_invalidated": invalidated,
+        "frames_reusable": total as usize - invalidated,
+    }))
+}
+
+/// Which top-level (and one level of nested) keys differ between two values.
+fn differing_fields(a: &Value, b: &Value) -> Vec<String> {
+    let (Some(x), Some(y)) = (a.as_object(), b.as_object()) else {
+        return if a == b {
+            Vec::new()
+        } else {
+            vec!["value".into()]
+        };
+    };
+    let mut out = Vec::new();
+    for (k, av) in x {
+        match y.get(k) {
+            None => out.push(k.clone()),
+            Some(bv) if av == bv => {}
+            Some(bv) => match (av.as_object(), bv.as_object()) {
+                (Some(ao), Some(bo)) => {
+                    for (ik, iv) in ao {
+                        if bo.get(ik) != Some(iv) {
+                            out.push(format!("{k}.{ik}"));
+                        }
+                    }
+                    for ik in bo.keys() {
+                        if !ao.contains_key(ik) {
+                            out.push(format!("{k}.{ik}"));
+                        }
+                    }
+                }
+                _ => out.push(k.clone()),
+            },
+        }
+    }
+    for k in y.keys() {
+        if !x.contains_key(k) {
+            out.push(k.clone());
+        }
+    }
+    out.sort();
+    out
+}
+
 fn cmd_verify(argv: &[String]) -> R {
     let manifest_path =
         get(argv, "--manifest").ok_or_else(|| usage("pass --manifest <dir>/manifest.json"))?;
@@ -1242,6 +1406,65 @@ mod tests {
         let mut p = std::env::temp_dir();
         p.push(format!("kinema-cli-{name}-{}", std::process::id()));
         p.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn fields_projection_keeps_only_what_was_asked_for() {
+        let argv: Vec<String> = ["check", "--fields", "ok,errors"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let projected = project_fields(
+            json!({ "ok": true, "errors": 0, "warnings": 2, "defects": [] }),
+            &argv,
+        );
+        assert_eq!(projected, json!({ "ok": true, "errors": 0 }));
+
+        // Without the flag nothing is dropped.
+        let plain = project_fields(json!({ "ok": true, "n": 1 }), &["check".to_string()]);
+        assert_eq!(plain, json!({ "ok": true, "n": 1 }));
+    }
+
+    #[test]
+    fn diff_reports_the_change_and_its_frame_cost() {
+        let root = scratch("diff");
+        let _ = fs::remove_dir_all(&root);
+        call(&["new", &root]).unwrap();
+        let base = format!("{root}/base.json");
+        fs::copy(format!("{root}/doc.json"), &base).unwrap();
+
+        // 30 fps, 5 s: 150 frames. The title starts at 0.2 s, so frame 6 is its first.
+        let ops = "[{\"op\":\"set-prop\",\"path\":\"comp:main/layer:title/text.color\",\"value\":\"#ffd166\",\"reason\":\"test\"}]";
+        let ops_path = format!("{root}/ops.json");
+        fs::write(&ops_path, ops).unwrap();
+        call(&["apply", "--project", &root, "--ops", &ops_path]).unwrap();
+
+        let report = call(&["diff", "--project", &root, "--from", &base]).unwrap();
+        assert_eq!(report["same"], json!(false));
+        assert_eq!(report["frames_total"], json!(150));
+        assert_eq!(
+            report["frames_reusable"],
+            json!(6),
+            "frames before the title exists"
+        );
+        assert_eq!(report["frames_invalidated"], json!(144));
+        let layers = report["layers"].as_array().unwrap();
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0]["layer"], json!("title"));
+        assert_eq!(layers[0]["fields"], json!(["text.color"]));
+
+        // The same document differs in nothing.
+        let same = call(&[
+            "diff",
+            "--project",
+            &root,
+            "--from",
+            &format!("{root}/doc.json"),
+        ])
+        .unwrap();
+        assert_eq!(same["same"], json!(true));
+        assert_eq!(same["frames_invalidated"], json!(0));
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
