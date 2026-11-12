@@ -686,6 +686,24 @@ fn draw_at(
             .eval_layer(comp, layer, t)
             .map_err(|e| RenderError::Doc(e.to_string()))?;
         let alpha = ev.opacity;
+
+        // An adjustment layer is not a picture: it grades everything already drawn beneath
+        // it, inside its own box. Painting it would hide what it is meant to change.
+        if layer.kind == LayerKind::Adjustment {
+            let [bx, by, bw, bh] = ev.bbox;
+            let bbox = [bx * scale, by * scale, bw * scale, bh * scale];
+            for m in &layer.modifiers {
+                apply_beneath(&mut canvas, layer, bbox, m, scale)?;
+            }
+            drawn.push(RenderedLayer {
+                id: layer.id.clone(),
+                kind: layer.kind.as_str(),
+                opacity: alpha,
+                matte: None,
+            });
+            continue;
+        }
+
         let matte = layer.mattes.as_ref();
         let offscreen = matte.is_some() || !layer.modifiers.is_empty();
 
@@ -800,6 +818,77 @@ fn draw_at(
     Ok((canvas, drawn, skipped.into_iter().collect()))
 }
 
+/// Apply one modifier to everything already drawn inside `bbox`.
+///
+/// Only modifiers that change colour or softness make sense without a layer's own
+/// coverage behind them, so the silhouette ones are refused here rather than silently
+/// doing nothing.
+fn apply_beneath(
+    canvas: &mut Canvas,
+    layer: &kinema_doc::Layer,
+    bbox: [f64; 4],
+    m: &kinema_doc::Modifier,
+    scale: f64,
+) -> Result<(), RenderError> {
+    let num = |key: &str, default: f64| -> f64 {
+        m.params
+            .get(key)
+            .and_then(|v| v.as_f64())
+            .unwrap_or(default)
+    };
+    let [bx, by, bw, bh] = bbox;
+    let rect = |pad: f64| -> [u32; 4] {
+        [
+            (bx - pad).floor().max(0.0) as u32,
+            (by - pad).floor().max(0.0) as u32,
+            ((bx + bw + pad).ceil() as i64).clamp(0, canvas.width as i64) as u32,
+            ((by + bh + pad).ceil() as i64).clamp(0, canvas.height as i64) as u32,
+        ]
+    };
+    match m.kind.as_str() {
+        "blur" => {
+            let radius = num("radius", 12.0) * scale;
+            let r = rect(radius);
+            blur_region(canvas, r, radius);
+            Ok(())
+        }
+        "exposure" => {
+            let gain = 2f64.powf(num("stops", 0.0));
+            grade_region(canvas, rect(0.0), |c| {
+                [c[0] * gain, c[1] * gain, c[2] * gain]
+            });
+            Ok(())
+        }
+        "contrast" => {
+            let k = num("amount", 1.0);
+            grade_region(canvas, rect(0.0), |c| {
+                [
+                    (c[0] - 0.5) * k + 0.5,
+                    (c[1] - 0.5) * k + 0.5,
+                    (c[2] - 0.5) * k + 0.5,
+                ]
+            });
+            Ok(())
+        }
+        "saturate" => {
+            let amount = num("amount", 1.0);
+            grade_region(canvas, rect(0.0), |c| {
+                let y = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+                [
+                    y + (c[0] - y) * amount,
+                    y + (c[1] - y) * amount,
+                    y + (c[2] - y) * amount,
+                ]
+            });
+            Ok(())
+        }
+        other => Err(RenderError::Modifier {
+            layer: layer.id.clone(),
+            kind: format!("{other} (an adjustment layer cannot use a silhouette modifier)"),
+        }),
+    }
+}
+
 /// Apply one modifier to the frame, reading the layer's own coverage as the source.
 ///
 /// An unknown type is an error with the layer named: silently ignoring a modifier is
@@ -886,10 +975,69 @@ fn apply_modifier(
             blur_region(own, rect, radius);
             Ok(())
         }
+        // Grades work in linear light, where a stop is a factor of two rather than an
+        // addition, so an exposure lift keeps its highlight roll-off.
+        "exposure" => {
+            let gain = 2f64.powf(num("stops", 0.0));
+            let rect = grow(0.0, own.width, own.height);
+            grade_region(own, rect, |c| [c[0] * gain, c[1] * gain, c[2] * gain]);
+            Ok(())
+        }
+        "contrast" => {
+            let k = num("amount", 1.0);
+            let rect = grow(0.0, own.width, own.height);
+            grade_region(own, rect, |c| {
+                [
+                    (c[0] - 0.5) * k + 0.5,
+                    (c[1] - 0.5) * k + 0.5,
+                    (c[2] - 0.5) * k + 0.5,
+                ]
+            });
+            Ok(())
+        }
+        "saturate" => {
+            let amount = num("amount", 1.0);
+            let rect = grow(0.0, own.width, own.height);
+            grade_region(own, rect, |c| {
+                let y = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+                [
+                    y + (c[0] - y) * amount,
+                    y + (c[1] - y) * amount,
+                    y + (c[2] - y) * amount,
+                ]
+            });
+            Ok(())
+        }
         other => Err(RenderError::Modifier {
             layer: layer.id.clone(),
             kind: other.to_string(),
         }),
+    }
+}
+
+/// Grade the layer in place over `rect`.
+///
+/// The grade runs on linear light and the round trip back through the sRGB transfer
+/// happens here, so a grade composed with a gradient's stops behaves the same way.
+fn grade_region(own: &mut Canvas, rect: [u32; 4], f: impl Fn([f64; 3]) -> [f64; 3]) {
+    let [x0, y0, x1, y1] = rect;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let px = own.get(x, y);
+            if px.a == 0 {
+                continue;
+            }
+            let lin = [
+                Rgba::linear_channel(px.r),
+                Rgba::linear_channel(px.g),
+                Rgba::linear_channel(px.b),
+            ];
+            let out = f(lin);
+            let o = ((y * own.width + x) * 4) as usize;
+            own.data[o] = quantise(Rgba::srgb_from_linear(out[0]) * 255.0);
+            own.data[o + 1] = quantise(Rgba::srgb_from_linear(out[1]) * 255.0);
+            own.data[o + 2] = quantise(Rgba::srgb_from_linear(out[2]) * 255.0);
+        }
     }
 }
 
@@ -1356,6 +1504,74 @@ mod tests {
         assert!(px(160, 90) > 200, "the middle stays bright");
         assert!(px(183, 90) > 5, "light spills past the bar's edge");
         assert!(px(4, 4) < 5, "and not to the corner");
+    }
+
+    #[test]
+    fn an_adjustment_layer_grades_what_is_beneath_it() {
+        let mut reveal = base_layer("grade", LayerKind::Adjustment);
+        reveal.modifiers = vec![kinema_doc::Modifier {
+            kind: "exposure".into(),
+            params: serde_json::json!({"stops": -1.0})
+                .as_object()
+                .unwrap()
+                .clone(),
+        }];
+        let doc = comp_of(vec![solid("bg", Rgba::opaque(128, 128, 128)), reveal]);
+        let out = render_frame(&doc, "main", 0, 1.0).unwrap();
+        let o = ((90 * out.width + 160) * 4) as usize;
+        let dark = out.pixels[o];
+        // sRGB 128 is linear 0.216; half of that encodes near 92, not the 64 that halving
+        // the encoded value would give.
+        assert!((85..=100).contains(&dark), "got {dark}");
+    }
+
+    #[test]
+    fn an_adjustment_layer_cannot_use_a_silhouette_modifier() {
+        let mut grade = base_layer("grade", LayerKind::Adjustment);
+        grade.modifiers = vec![kinema_doc::Modifier {
+            kind: "glow".into(),
+            params: serde_json::Map::new(),
+        }];
+        let doc = comp_of(vec![solid("bg", Rgba::opaque(10, 10, 10)), grade]);
+        let err = render_frame(&doc, "main", 0, 1.0).unwrap_err();
+        assert_eq!(err.to_json()["code"], "modifier");
+    }
+
+    #[test]
+    fn a_stop_of_exposure_doubles_the_linear_light() {
+        let mut bar = rect("bar", [40.0, 40.0], Rgba::opaque(64, 64, 64));
+        bar.modifiers = vec![kinema_doc::Modifier {
+            kind: "exposure".into(),
+            params: serde_json::json!({"stops": 1.0})
+                .as_object()
+                .unwrap()
+                .clone(),
+        }];
+        let doc = comp_of(vec![solid("bg", Rgba::opaque(0, 0, 0)), bar]);
+        let out = render_frame(&doc, "main", 0, 1.0).unwrap();
+        let o = ((90 * out.width + 160) * 4) as usize;
+        let lifted = out.pixels[o];
+        // One stop is a doubling in linear light: sRGB 64 is linear 0.051, so the result
+        // encodes near 95, not the 128 an additive lift would give.
+        assert!((88..=104).contains(&lifted), "got {lifted}");
+    }
+
+    #[test]
+    fn desaturating_a_colour_leaves_its_brightness() {
+        let mut bar = rect("bar", [40.0, 40.0], Rgba::opaque(255, 0, 0));
+        bar.modifiers = vec![kinema_doc::Modifier {
+            kind: "saturate".into(),
+            params: serde_json::json!({"amount": 0.0})
+                .as_object()
+                .unwrap()
+                .clone(),
+        }];
+        let doc = comp_of(vec![solid("bg", Rgba::opaque(0, 0, 0)), bar]);
+        let out = render_frame(&doc, "main", 0, 1.0).unwrap();
+        let o = ((90 * out.width + 160) * 4) as usize;
+        let (r, g, b) = (out.pixels[o], out.pixels[o + 1], out.pixels[o + 2]);
+        assert_eq!((r, g, b), (g, g, g), "pure grey, no hue left");
+        assert!(r > 60, "and it is not black");
     }
 
     #[test]

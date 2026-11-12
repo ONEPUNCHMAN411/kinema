@@ -867,7 +867,9 @@ impl Doc {
                     size = s.size;
                 }
             }
-            LayerKind::Solid => {
+            LayerKind::Solid | LayerKind::Adjustment => {
+                // Both cover the frame unless a transform says otherwise: an adjustment with
+                // no size would grade nothing.
                 size = [c.size[0] as f64, c.size[1] as f64];
             }
             LayerKind::Comp => {
