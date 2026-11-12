@@ -7,6 +7,7 @@
 pub use kinema_doc::{Blend, Doc, LayerKind, Rgba};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Debug, Clone)]
 pub struct Canvas {
@@ -235,34 +236,31 @@ impl Canvas {
             && x1 >= self.width
             && y1 >= self.height
         {
-            const LUT: usize = 2048;
-            let table: Vec<[f64; 3]> = (0..LUT)
-                .map(|i| {
-                    let lin = g.sample_linear(i as f64 / (LUT - 1) as f64);
-                    [
-                        Rgba::srgb_from_linear(lin[0]),
-                        Rgba::srgb_from_linear(lin[1]),
-                        Rgba::srgb_from_linear(lin[2]),
-                    ]
-                })
-                .collect();
-            for py in 0..self.height {
-                for px in 0..self.width {
-                    let t = proj.at(px as f64 + 0.5, py as f64 + 0.5);
-                    let idx = ((t * (LUT - 1) as f64).round() as usize).min(LUT - 1);
-                    let entry = table[idx];
-                    let bias = if g.dither {
-                        BAYER4[(py % 4) as usize][(px % 4) as usize] / 16.0 - 0.5
-                    } else {
-                        0.0
-                    };
-                    let o = ((py * self.width + px) * 4) as usize;
-                    self.data[o] = quantise(entry[0] * 255.0 + bias);
-                    self.data[o + 1] = quantise(entry[1] * 255.0 + bias);
-                    self.data[o + 2] = quantise(entry[2] * 255.0 + bias);
-                    self.data[o + 3] = 255;
+            // Motion blur asks for the same ramp once per subframe and a sequence asks for
+            // it once per frame, so the tabulated result is kept: the second and later
+            // requests are a memcpy.
+            let key = ramp_key(g, self.width, self.height);
+            let cached = ramp_cache()
+                .lock()
+                .ok()
+                .and_then(|c| c.iter().find(|e| e.key == key).map(|e| e.pixels.clone()));
+            let pixels = match cached {
+                Some(p) => p,
+                None => {
+                    let built = Arc::new(build_ramp(g, &proj, self.width, self.height));
+                    if let Ok(mut c) = ramp_cache().lock() {
+                        if c.len() >= 2 {
+                            c.clear();
+                        }
+                        c.push(RampEntry {
+                            key,
+                            pixels: built.clone(),
+                        });
+                    }
+                    built
                 }
-            }
+            };
+            self.data.copy_from_slice(&pixels);
             return;
         }
 
@@ -409,6 +407,57 @@ const BAYER4: [[f64; 4]; 4] = [
 /// bits per channel.
 fn quantise(v: f64) -> u8 {
     v.round().clamp(0.0, 255.0) as u8
+}
+
+struct RampEntry {
+    key: String,
+    pixels: Arc<Vec<u8>>,
+}
+
+fn ramp_cache() -> &'static Mutex<Vec<RampEntry>> {
+    static CACHE: OnceLock<Mutex<Vec<RampEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn ramp_key(g: &kinema_doc::Gradient, w: u32, h: u32) -> String {
+    format!("{w}x{h}|{}", serde_json::to_string(g).unwrap_or_default())
+}
+
+/// Tabulate a whole-canvas ramp into RGBA bytes.
+///
+/// The sRGB transfer is a `powf`, so the ramp is sampled at 2048 steps first — finer than
+/// 8-bit output can show — and then only looked up per pixel.
+fn build_ramp(g: &kinema_doc::Gradient, proj: &kinema_doc::Projector, w: u32, h: u32) -> Vec<u8> {
+    const LUT: usize = 2048;
+    let table: Vec<[f64; 3]> = (0..LUT)
+        .map(|i| {
+            let lin = g.sample_linear(i as f64 / (LUT - 1) as f64);
+            [
+                Rgba::srgb_from_linear(lin[0]),
+                Rgba::srgb_from_linear(lin[1]),
+                Rgba::srgb_from_linear(lin[2]),
+            ]
+        })
+        .collect();
+    let mut out = vec![0u8; (w as usize) * (h as usize) * 4];
+    for py in 0..h {
+        for px in 0..w {
+            let t = proj.at(px as f64 + 0.5, py as f64 + 0.5);
+            let idx = ((t * (LUT - 1) as f64).round() as usize).min(LUT - 1);
+            let entry = table[idx];
+            let bias = if g.dither {
+                BAYER4[(py % 4) as usize][(px % 4) as usize] / 16.0 - 0.5
+            } else {
+                0.0
+            };
+            let o = ((py * w + px) * 4) as usize;
+            out[o] = quantise(entry[0] * 255.0 + bias);
+            out[o + 1] = quantise(entry[1] * 255.0 + bias);
+            out[o + 2] = quantise(entry[2] * 255.0 + bias);
+            out[o + 3] = 255;
+        }
+    }
+    out
 }
 
 fn shaded(g: &kinema_doc::Gradient, t: f64, px: u32, py: u32) -> Rgba {
