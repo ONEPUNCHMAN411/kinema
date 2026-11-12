@@ -1,0 +1,18 @@
+[package]
+name = "kinema-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "kin"
+path = "src/main.rs"
+
+[dependencies]
+kinema-time.workspace = true
+kinema-doc.workspace = true
+kinema-deps.workspace = true
+kinema-raster.workspace = true
+kinema-checks.workspace = true
+serde_json.workspace = true
