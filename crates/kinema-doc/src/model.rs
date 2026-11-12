@@ -23,9 +23,68 @@ pub struct Doc {
     pub comps: BTreeMap<String, Comp>,
     #[serde(default)]
     pub assets: BTreeMap<String, Asset>,
-    /// Palette, type scale and motion curves, once `taste` lands.
+    /// The project's own design system: one accent, one scale, one pairing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub look: Option<Value>,
+    pub look: Option<Look>,
+}
+
+/// A look is the small set of decisions that make a project read as one design.
+///
+/// It is deliberately narrow: an accent, which end of the ramp to build from, the type
+/// scale, and the pairing id. Everything else is derived from those, so a document can
+/// state its system once and the checks can hold it to it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Look {
+    /// The one accent hue. Every other chromatic colour must share it.
+    pub accent: Rgba,
+    #[serde(default)]
+    pub scheme: Scheme,
+    #[serde(default)]
+    pub scale: Scale,
+    /// Pairing id from `kinema-type`, e.g. `editorial`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scheme {
+    #[default]
+    Dark,
+    Light,
+}
+
+/// The modular scale the document commits to.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Scale {
+    #[serde(default = "default_scale_base")]
+    pub base: f64,
+    #[serde(default = "default_scale_ratio")]
+    pub ratio: f64,
+    #[serde(default = "default_scale_steps")]
+    pub steps: usize,
+}
+
+fn default_scale_base() -> f64 {
+    16.0
+}
+
+fn default_scale_ratio() -> f64 {
+    1.25
+}
+
+fn default_scale_steps() -> usize {
+    10
+}
+
+impl Default for Scale {
+    fn default() -> Self {
+        Scale {
+            base: default_scale_base(),
+            ratio: default_scale_ratio(),
+            steps: default_scale_steps(),
+        }
+    }
 }
 
 fn default_schema() -> String {
@@ -433,7 +492,12 @@ impl Doc {
             fps: Fps::new(30, 1),
             comps: BTreeMap::new(),
             assets: BTreeMap::new(),
-            look: None,
+            look: Some(Look {
+                accent: Rgba::opaque(0x4c, 0x8f, 0xff),
+                scheme: Scheme::Dark,
+                scale: Scale::default(),
+                pairing: Some("editorial".into()),
+            }),
         }
     }
 
@@ -705,6 +769,19 @@ impl Doc {
             }
             if c.duration <= 0.0 {
                 out.push(format!("comp `{id}` has no duration"));
+            }
+            if let Some(look) = &self.look {
+                if look.scale.base <= 0.0 {
+                    out.push("look scale base must be positive".into());
+                }
+                if look.scale.ratio <= 1.0 {
+                    out.push(
+                        "look scale ratio must be above 1, or the scale runs backwards".into(),
+                    );
+                }
+                if !(2..=16).contains(&look.scale.steps) {
+                    out.push("look scale steps must be between 2 and 16".into());
+                }
             }
             let mut seen = std::collections::BTreeSet::new();
             for l in &c.layers {

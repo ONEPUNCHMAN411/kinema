@@ -61,6 +61,7 @@ pub fn run(doc: &Doc, comp: &str, frame: Option<u32>) -> Vec<Defect> {
     read(doc, comp, &mut out);
     chroma(doc, comp, &mut out);
     palette(doc, comp, &mut out);
+    look_drift(doc, comp, &mut out);
     ease_flat(doc, comp, &mut out);
     hold_none(doc, comp, &mut out);
     shutter(doc, comp, &mut out);
@@ -324,7 +325,11 @@ fn chroma(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
 /// Sizes should come from the modular scale, and there should be few of them.
 fn type_scale(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
     let Ok(c) = doc.comp(comp) else { return };
-    let steps = kinema_type::house_ladder();
+    // A document with a look is measured against its own scale; otherwise the house one.
+    let steps = match &doc.look {
+        Some(look) => kinema_type::ladder(look.scale.base, look.scale.ratio, look.scale.steps),
+        None => kinema_type::house_ladder(),
+    };
     let mut sizes: Vec<f64> = Vec::new();
     for layer in &c.layers {
         let Some(text) = &layer.text else { continue };
@@ -380,6 +385,63 @@ fn type_scale(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
             hint: "four sizes is a hierarchy; more is a slide deck. Which size to drop is a directing call, so `kin type` shows the ladder to choose from".into(),
             fix_op: None,
         });
+    }
+}
+
+/// A look commits to one accent hue. A chromatic colour that is not near it is a second
+/// idea, and second ideas are what make a frame look assembled rather than designed.
+fn look_drift(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
+    let Some(look) = &doc.look else { return };
+    let Ok(c) = doc.comp(comp) else { return };
+    let accent_hue = look.accent.oklab_hue();
+    for layer in &c.layers {
+        let mut colours: Vec<(&'static str, kinema_doc::Rgba)> = Vec::new();
+        if let Some(s) = &layer.solid {
+            colours.push(("solid.color", s.color));
+        }
+        if let Some(s) = &layer.shape {
+            colours.push(("shape.color", s.color));
+        }
+        if let Some(t) = &layer.text {
+            colours.push(("text.color", t.color));
+        }
+        for (field, colour) in colours {
+            if colour.a < 8 || colour.oklab_chroma() <= 0.03 {
+                continue; // transparent or neutral: a neutral is not a second idea
+            }
+            let hue = colour.oklab_hue();
+            let mut distance = (hue - accent_hue).abs();
+            if distance > 180.0 {
+                distance = 360.0 - distance;
+            }
+            if distance <= 25.0 {
+                continue;
+            }
+            out.push(Defect {
+                code: "LOOK-DRIFT",
+                severity: "warn",
+                comp: comp.into(),
+                layer: Some(layer.id.clone()),
+                frame: None,
+                evidence: json!({
+                    "reason": "second hue",
+                    "field": field,
+                    "colour": colour.to_hex(),
+                    "hue": (hue * 10.0).round() / 10.0,
+                    "accent_hue": (accent_hue * 10.0).round() / 10.0,
+                    "distance_deg": (distance * 10.0).round() / 10.0,
+                }),
+                hint: format!(
+                    "the look is built on one accent hue ({accent_hue:.0}°); {} sits {distance:.0}° away, which reads as a second idea",
+                    colour.to_hex()
+                ),
+                fix_op: Some(set_prop(
+                    format!("comp:{comp}/layer:{}/{field}", layer.id),
+                    json!(look.accent.to_hex()),
+                    "bring the colour back onto the look's accent hue",
+                )),
+            });
+        }
     }
 }
 
@@ -977,6 +1039,62 @@ mod tests {
             25.0
         );
         assert!(!defects(&doc).iter().any(|d| d.code == "TYPE-SCALE"));
+    }
+
+    #[test]
+    fn a_second_hue_is_caught_and_snapped_to_the_accent() {
+        let mut doc = Doc::starter();
+        assert!(
+            !defects(&doc).iter().any(|d| d.code == "LOOK-DRIFT"),
+            "the starter is built on its look"
+        );
+        doc.comps.get_mut("main").unwrap().layers[1]
+            .shape
+            .as_mut()
+            .unwrap()
+            .color = kinema_doc::Rgba::opaque(0xff, 0x00, 0x55);
+        let found = defects(&doc);
+        let d = found
+            .iter()
+            .find(|d| d.code == "LOOK-DRIFT")
+            .expect("LOOK-DRIFT");
+        assert_eq!(d.evidence["field"], "shape.color");
+        assert!(d.evidence["distance_deg"].as_f64().unwrap() > 100.0);
+        let op: kinema_doc::Op = serde_json::from_value(d.fix_op.clone().unwrap()).unwrap();
+        doc.apply(&op).unwrap();
+        assert!(!defects(&doc).iter().any(|d| d.code == "LOOK-DRIFT"));
+    }
+
+    #[test]
+    fn a_document_without_a_look_is_not_policed() {
+        let mut doc = Doc::starter();
+        doc.look = None;
+        doc.comps.get_mut("main").unwrap().layers[1]
+            .shape
+            .as_mut()
+            .unwrap()
+            .color = kinema_doc::Rgba::opaque(0xff, 0x00, 0x55);
+        let found = defects(&doc);
+        assert!(
+            !found.iter().any(|d| d.code == "LOOK-DRIFT"),
+            "without a stated look there is nothing to drift from"
+        );
+    }
+
+    #[test]
+    fn the_look_supplies_the_scale() {
+        let mut doc = Doc::starter();
+        if let Some(look) = doc.look.as_mut() {
+            look.scale.base = 20.0;
+            look.scale.ratio = 1.5;
+        }
+        // 96 px is on the house scale but not on 20 x 1.5 (20, 30, 45, 67.5, 101.25).
+        let found = defects(&doc);
+        let d = found
+            .iter()
+            .find(|d| d.code == "TYPE-SCALE")
+            .expect("the document's own scale is the one that counts");
+        assert_eq!(d.evidence["nearest"], 101.25);
     }
 
     #[test]

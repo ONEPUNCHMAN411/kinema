@@ -72,6 +72,12 @@ reproducibility claim stated as a command.
 Not built yet: GPU raster, media decode, encode, audio, assets, capture, templates, MCP.
 Each returns a typed `not-implemented` error with a hint rather than pretending.
 
+A document can state its design system once, in `look`: one accent, dark or light, the
+type scale and a pairing. `kin look` resolves it into tokens with proofs, a ladder and a
+pairing reason, lists any drift, and hands back a `set-look` op ready for `kin apply`. From
+then on `TYPE-SCALE` measures against the document's own scale and `LOOK-DRIFT` reports a
+chromatic colour more than 25° off the accent hue, with the accent as the remedy.
+
 Text carries a staggered entrance of its own: `text.anim` is `reveal` or `rise`, per
 character, word or line, with its own stagger, duration and easing, evaluated on the
 layer's clock. The starter uses it, so the letters resolve left to right without the
@@ -114,6 +120,7 @@ kin fonts                        # bundled families, weights, licence and attrib
 kin type                         # the modular scale with optical spacing
 kin typeface recommend "a technical developer video about data"
 kin palette --accent '#3b82f6' --scheme dark   # roles with contrast proofs
+kin look --project demo          # the stated look, resolved, plus drift and a ready op
 kin asset add still.png --project demo --spdx cc-by-4.0 --source-url <url> --author <name>
 kin undo --project demo          # replay the journal's inverses
 kin verify --project demo --manifest demo/frames/manifest.json --render

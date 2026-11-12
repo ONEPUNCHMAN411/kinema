@@ -65,6 +65,7 @@ fn dispatch(argv: &[String]) -> R {
         "type" | "scale" => Ok(cmd_type(argv)),
         "typeface" => Ok(cmd_typeface(argv)),
         "palette" => cmd_palette(argv),
+        "look" => cmd_look(argv),
         "schema" => Ok(schema::doc_schema()),
         "help" | "--help" | "-h" => Ok(help()),
         "version" | "--version" | "-V" => {
@@ -153,6 +154,7 @@ fn capabilities() -> Value {
             {"name": "type", "summary": "the modular scale with optical tracking and leading", "args": ["--base <px>", "--ratio <f>", "--steps <n>"]},
             {"name": "typeface", "summary": "pick a pairing from a brief, with reasons and a role assignment", "args": ["recommend <brief>"]},
             {"name": "palette", "summary": "roles and contrast proofs from one accent", "args": ["--accent <#rrggbb>", "--scheme dark|light"]},
+            {"name": "look", "summary": "the project's stated design system, resolved, with drift and a ready op", "args": ["--accent <#rrggbb>", "--scheme dark|light", "--comp <id>"]},
             {"name": "log", "summary": "the op journal", "args": []}
         ],
         "licences": ["cc0-1.0", "cc-by-4.0", "cc-by-sa-4.0", "cc-by-nc-4.0", "cc-by-nd-4.0", "mit", "apache-2.0", "bsd-3-clause", "ofl-1.1", "unknown"],
@@ -166,7 +168,8 @@ fn capabilities() -> Value {
             {"code": "SHUTTER", "severity": "warn", "detects": "motion above 1.5 px/frame with no shutter", "fix": true},
             {"code": "HOLD-NONE", "severity": "warn", "detects": "no still moment in over three seconds", "fix": false},
             {"code": "STAGGER", "severity": "warn", "detects": "more than 70% of layers entering on one frame", "fix": true},
-            {"code": "TYPE-SCALE", "severity": "warn", "detects": "a size off the modular scale, or more than four sizes", "fix": true}
+            {"code": "TYPE-SCALE", "severity": "warn", "detects": "a size off the modular scale, or more than four sizes", "fix": true},
+            {"code": "LOOK-DRIFT", "severity": "warn", "detects": "a chromatic colour more than 25 degrees from the look's accent hue", "fix": true}
         ],
         "checks_advisory": {"HOLD-NONE": "the remedy is which beat to hold; the hint names it, the engine will not pick"},
         "checks_pending": ["CUT-TIMING", "JUMPCUT", "BANDING", "LOUD"],
@@ -202,6 +205,86 @@ fn capabilities() -> Value {
 
 /// The bundle as data: what a document may name, what each family ships, and where its
 /// licence text lives.
+fn cmd_look(argv: &[String]) -> R {
+    let project = Project::open(argv)?;
+    let doc = project.load()?;
+    let comp = get(argv, "--comp").unwrap_or("main").to_string();
+    let existing = doc.look.clone();
+
+    // Flags override the stated look, so an agent can trial one before committing it.
+    let accent = match get(argv, "--accent") {
+        Some(spec) => kinema_doc::Rgba::parse(spec).map_err(|e| {
+            json!({
+                "ok": false,
+                "error": {
+                    "code": "bad-colour",
+                    "message": e,
+                    "hint": "pass --accent as #rgb or #rrggbb",
+                    "fix_op": null,
+                    "doc": "docs/PLAN.md#type-and-colour"
+                }
+            })
+        })?,
+        None => existing
+            .as_ref()
+            .map(|l| l.accent)
+            .unwrap_or_else(|| kinema_doc::Rgba::opaque(0x4c, 0x8f, 0xff)),
+    };
+    let dark = match get(argv, "--scheme") {
+        Some("light") => false,
+        Some("dark") => true,
+        Some(other) => return Err(usage(&format!("--scheme is dark or light, not `{other}`"))),
+        None => !matches!(
+            existing.as_ref().map(|l| l.scheme),
+            Some(kinema_doc::Scheme::Light)
+        ),
+    };
+    let scale = existing.as_ref().map(|l| l.scale).unwrap_or_default();
+    let ladder = kinema_type::ladder(scale.base, scale.ratio, scale.steps);
+    let pairing_id = existing
+        .as_ref()
+        .and_then(|l| l.pairing.clone())
+        .unwrap_or_else(|| "editorial".to_string());
+    let pairing = kinema_type::PAIRINGS
+        .iter()
+        .find(|p| p.id == pairing_id)
+        .unwrap_or(&kinema_type::PAIRINGS[0]);
+
+    let tokens = kinema_palette::scheme(accent, dark);
+    let look = kinema_doc::Look {
+        accent,
+        scheme: if dark {
+            kinema_doc::Scheme::Dark
+        } else {
+            kinema_doc::Scheme::Light
+        },
+        scale,
+        pairing: Some(pairing.id.to_string()),
+    };
+    let drift: Vec<Value> = kinema_checks::run(&doc, &comp, None)
+        .into_iter()
+        .filter(|d| d.code == "LOOK-DRIFT" || d.code == "TYPE-SCALE")
+        .map(|d| d.to_json())
+        .collect();
+    let proofs: Vec<Value> = tokens
+        .proofs()
+        .iter()
+        .map(|p| json!({"pair": format!("{} on {}", p.fg, p.bg), "ratio": p.ratio, "target": p.target, "pass": p.pass}))
+        .collect();
+    Ok(json!({
+        "ok": true,
+        "stated": existing.is_some(),
+        "look": serde_json::to_value(&look).unwrap_or(Value::Null),
+        "tokens": tokens.roles().iter().map(|(role, colour)| json!({"role": role, "value": colour.to_hex()})).collect::<Vec<_>>(),
+        "proofs": proofs,
+        "ladder": ladder.iter().map(|s| json!({"role": kinema_type::role_of(s.index), "size": s.size, "tracking": s.tracking, "leading": s.leading})).collect::<Vec<_>>(),
+        "pairing": {"id": pairing.id, "display": pairing.display, "body": pairing.body, "mono": pairing.mono, "why": pairing.why},
+        "drift": drift,
+        "op": {"op": "set-look", "look": serde_json::to_value(&look).unwrap_or(Value::Null), "reason": "state the project's look once, so the checks can hold it"},
+        "next": "write that op to a file and run `kin apply --ops ops.json`; `kin check` then measures against it",
+    }))
+}
+
 fn cmd_palette(argv: &[String]) -> R {
     let spec = get(argv, "--accent").unwrap_or("#3b82f6");
     let accent = kinema_doc::Rgba::parse(spec).map_err(|e| {

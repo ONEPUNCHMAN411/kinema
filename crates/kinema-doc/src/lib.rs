@@ -13,7 +13,7 @@ pub mod schema;
 pub use color::Rgba;
 pub use model::{
     Align, AnimKind, AnimUnit, Asset, Blend, Comp, Doc, EvaluatedLayer, Layer, LayerKind, Licence,
-    Matte, Modifier, Shape, ShapeKind, Solid, Text, TextAnim, Transform,
+    Look, Matte, Modifier, Scale, Scheme, Shape, ShapeKind, Solid, Text, TextAnim, Transform,
 };
 pub use ops::{AppliedResult, Op};
 pub use prop::{Ease, EvalError, Keyframe, Prop};

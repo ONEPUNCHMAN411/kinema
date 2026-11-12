@@ -66,6 +66,13 @@ tightens display and opens small text, leading that runs 1.5 → 1.1 with size, 
 with a stated reason and a role assignment, and the `TYPE-SCALE` detector that snaps an
 off-scale size and reports a fifth size as advisory.
 
+A document states its design system in `look` — accent, scheme, scale, pairing — through a
+`set-look` op with an inverse, so a look change is undoable and journaled like anything
+else. `kin look` resolves it (tokens with proofs, the ladder, the pairing reason, current
+drift) and returns the op that would write it. `TYPE-SCALE` then measures against the
+document's scale, and `LOOK-DRIFT` reports a chromatic colour more than 25° from the accent
+hue and offers the accent as the remedy.
+
 Text animation is in the document, not bolted on: `text.anim` is `reveal` or `rise`, per
 character, word or line, with stagger, duration, easing and travel distance, evaluated per
 glyph on the layer's own clock. The starter uses it, because a staggered resolve is the

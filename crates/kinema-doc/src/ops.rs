@@ -3,7 +3,7 @@
 //! Every mutation is an `Op` that can be inverted, so the journal gives undo, diff and
 //! provenance for free. A path looks like `comp:main/layer:title/transform.position`.
 
-use crate::model::{Asset, Layer};
+use crate::model::{Asset, Layer, Look};
 use crate::{Doc, DocError, Prop};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -51,6 +51,13 @@ pub enum Op {
         #[serde(default)]
         reason: String,
     },
+    /// Replace the document's look, or clear it with `"look": null`.
+    SetLook {
+        #[serde(default)]
+        look: Option<Look>,
+        #[serde(default)]
+        reason: String,
+    },
 }
 
 impl Op {
@@ -61,7 +68,8 @@ impl Op {
             | Op::DeleteLayer { reason, .. }
             | Op::SetComp { reason, .. }
             | Op::SetAsset { reason, .. }
-            | Op::RemoveAsset { reason, .. } => reason,
+            | Op::RemoveAsset { reason, .. }
+            | Op::SetLook { reason, .. } => reason,
         }
     }
 
@@ -73,6 +81,7 @@ impl Op {
             Op::SetComp { .. } => "set-comp",
             Op::SetAsset { .. } => "set-asset",
             Op::RemoveAsset { .. } => "remove-asset",
+            Op::SetLook { .. } => "set-look",
         }
     }
 }
@@ -222,6 +231,10 @@ fn inverse_of(before: &Doc, op: &Op) -> Result<Option<Op>, DocError> {
             })),
             None => Ok(None),
         },
+        Op::SetLook { reason, .. } => Ok(Some(Op::SetLook {
+            look: before.look.clone(),
+            reason: format!("undo of: {reason}"),
+        })),
     }
 }
 
@@ -304,6 +317,9 @@ impl Doc {
                     });
                 }
             }
+            Op::SetLook { look, .. } => {
+                self.look = look.clone();
+            }
         }
         self.version += 1;
         Ok(AppliedResult {
@@ -339,7 +355,10 @@ pub fn op_schema() -> Value {
             {"type": "object", "required": ["op", "asset"],
              "properties": {"op": {"const": "set-asset"}, "asset": {"type": "object"}, "reason": {"type": "string"}}},
             {"type": "object", "required": ["op", "asset"],
-             "properties": {"op": {"const": "remove-asset"}, "asset": {"type": "string"}, "reason": {"type": "string"}}}
+             "properties": {"op": {"const": "remove-asset"}, "asset": {"type": "string"}, "reason": {"type": "string"}}},
+            {"type": "object", "required": ["op"],
+             "properties": {"op": {"const": "set-look"}, "look": {"type": ["object", "null"]}, "reason": {"type": "string"}},
+             "examples": [{"op": "set-look", "look": {"accent": "#4c8fff", "scheme": "dark", "scale": {"base": 16, "ratio": 1.25}}, "reason": "one accent for the whole project"}]}
         ]
     })
 }
@@ -472,6 +491,35 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(doc.apply(&op).unwrap_err().to_json()["code"], "not-found");
+    }
+
+    #[test]
+    fn a_look_can_be_set_and_undone() {
+        let mut doc = Doc::starter();
+        let before = doc.look.clone();
+        let op: Op = serde_json::from_value(json!({
+            "op": "set-look",
+            "look": {"accent": "#f67a1f", "scheme": "light", "scale": {"base": 14, "ratio": 1.333}},
+            "reason": "test"
+        }))
+        .unwrap();
+        let res = doc.apply(&op).unwrap();
+        let look = doc.look.clone().expect("look set");
+        assert_eq!(look.accent, crate::Rgba::opaque(0xf6, 0x7a, 0x1f));
+        assert_eq!(look.scale.base, 14.0);
+        doc.apply(&res.inverse.unwrap()).unwrap();
+        assert_eq!(doc.look, before, "undo restores the previous look");
+    }
+
+    #[test]
+    fn a_look_can_be_cleared() {
+        let mut doc = Doc::starter();
+        let op: Op = serde_json::from_value(json!({
+            "op": "set-look", "look": null, "reason": "test"
+        }))
+        .unwrap();
+        doc.apply(&op).unwrap();
+        assert!(doc.look.is_none());
     }
 
     #[test]

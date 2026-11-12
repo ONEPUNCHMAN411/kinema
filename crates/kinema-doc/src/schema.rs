@@ -25,7 +25,24 @@ pub fn doc_schema() -> Value {
                 "type": "object",
                 "additionalProperties": {"$ref": "#/$defs/asset"}
             },
-            "look": {"description": "palette, type scale and motion curves"}
+            "look": {
+                "type": "object",
+                "description": "the project's design system: one accent, one scale, one pairing",
+                "required": ["accent"],
+                "properties": {
+                    "accent": {"$ref": "#/$defs/colour"},
+                    "scheme": {"enum": ["dark", "light"]},
+                    "scale": {
+                        "type": "object",
+                        "properties": {
+                            "base": {"type": "number", "exclusiveMinimum": 0},
+                            "ratio": {"type": "number", "exclusiveMinimum": 1},
+                            "steps": {"type": "integer", "minimum": 2, "maximum": 16}
+                        }
+                    },
+                    "pairing": {"type": "string", "examples": ["editorial", "technical", "quiet"]}
+                }
+            }
         },
         "$defs": {
             "rational": {
