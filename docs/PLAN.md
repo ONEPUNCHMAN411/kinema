@@ -1,5 +1,9 @@
 # Kinema — the plan
 
+The approved plan is preserved verbatim in [`PLAN-ORIGINAL.md`](PLAN-ORIGINAL.md). That
+file is the authority; this one expands it into reference documentation and records what
+is actually built, so a change here can never quietly rewrite what was agreed.
+
 Kinema is a headless motion engine for AI agents. CLI `kin`, crates `kinema-*`, no
 reused code. There is no human UI: every surface is a tool call, a schema, or a
 checkable result.

@@ -28,7 +28,10 @@ one typed document, offers code frontends, and evaluates it in one deterministic
 | Blender | ID datablocks with linking, depsgraph, node graphs as data, modifier stack, AOV/EXR/OCIO |
 
 The craft layer — type, colour, motion, audio and the detector suite — is what makes
-output look professional rather than generated. It is specified in `docs/PLAN.md`.
+output look professional rather than generated.
+
+The approved plan is kept verbatim in [`docs/PLAN-ORIGINAL.md`](docs/PLAN-ORIGINAL.md);
+[`docs/PLAN.md`](docs/PLAN.md) expands it and records what is built against it.
 
 ## Status: P0
 
