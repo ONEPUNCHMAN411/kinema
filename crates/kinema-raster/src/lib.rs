@@ -738,7 +738,7 @@ fn draw_at(
         let [bx, by, bw, bh] = ev.bbox;
         let bbox = [bx * scale, by * scale, bw * scale, bh * scale];
         for m in &layer.modifiers {
-            apply_modifier(&mut canvas, &own, layer, bbox, m, scale)?;
+            apply_modifier(&mut canvas, &mut own, layer, bbox, m, scale)?;
         }
 
         let mut matte_desc = None;
@@ -806,7 +806,7 @@ fn draw_at(
 /// exactly how a document ends up not looking like what it says.
 fn apply_modifier(
     canvas: &mut Canvas,
-    own: &Canvas,
+    own: &mut Canvas,
     layer: &kinema_doc::Layer,
     bbox: [f64; 4],
     m: &kinema_doc::Modifier,
@@ -818,6 +818,17 @@ fn apply_modifier(
             .and_then(|v| v.as_f64())
             .unwrap_or(default)
     };
+    // Only the layer's box grown by the radius can be touched. Working over the whole
+    // canvas made a 40 px glow cost more than the rest of the frame.
+    let [bx, by, bw, bh] = bbox;
+    let grow = |pad: f64, w: u32, h: u32| -> [u32; 4] {
+        [
+            (bx - pad).floor().max(0.0) as u32,
+            (by - pad).floor().max(0.0) as u32,
+            ((bx + bw + pad).ceil() as i64).clamp(0, w as i64) as u32,
+            ((by + bh + pad).ceil() as i64).clamp(0, h as i64) as u32,
+        ]
+    };
     match m.kind.as_str() {
         "glow" => {
             let color = m
@@ -825,16 +836,8 @@ fn apply_modifier(
                 .get("color")
                 .and_then(|v| serde_json::from_value::<Rgba>(v.clone()).ok())
                 .unwrap_or(Rgba::opaque(255, 255, 255));
-            // Only the layer's own box, grown by the radius, can be lit. Working over the
-            // whole canvas made a 40 px glow cost more than the rest of the frame.
             let pad = num("radius", 24.0) * scale;
-            let [bx, by, bw, bh] = bbox;
-            let rect = [
-                (bx - pad).floor().max(0.0) as u32,
-                (by - pad).floor().max(0.0) as u32,
-                ((bx + bw + pad).ceil() as i64).clamp(0, canvas.width as i64) as u32,
-                ((by + bh + pad).ceil() as i64).clamp(0, canvas.height as i64) as u32,
-            ];
+            let rect = grow(pad, canvas.width, canvas.height);
             glow(
                 canvas,
                 own,
@@ -845,10 +848,62 @@ fn apply_modifier(
             );
             Ok(())
         }
+        "blur" => {
+            let radius = num("radius", 12.0) * scale;
+            let rect = grow(radius, own.width, own.height);
+            blur_region(own, rect, radius);
+            Ok(())
+        }
         other => Err(RenderError::Modifier {
             layer: layer.id.clone(),
             kind: other.to_string(),
         }),
+    }
+}
+
+/// Blur the layer in place over `rect`.
+///
+/// Colour is premultiplied before the blur and divided out afterwards, or a soft edge
+/// picks up the colour of the transparent pixels beside it.
+fn blur_region(own: &mut Canvas, rect: [u32; 4], radius: f64) {
+    let [x0, y0, x1, y1] = rect;
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    let r = (radius.max(1.0) / 3.0).round().max(1.0) as usize;
+    let mut planes: Vec<Vec<f32>> = (0..4).map(|_| Vec::with_capacity(w * h)).collect();
+    for y in 0..h {
+        for x in 0..w {
+            let p = own.get(x0 + x as u32, y0 + y as u32);
+            let a = p.a as f32 / 255.0;
+            planes[0].push(p.r as f32 / 255.0 * a);
+            planes[1].push(p.g as f32 / 255.0 * a);
+            planes[2].push(p.b as f32 / 255.0 * a);
+            planes[3].push(a);
+        }
+    }
+    let mut tmp = vec![0f32; w * h];
+    let mut scratch = vec![0f32; w * h];
+    for plane in planes.iter_mut() {
+        box_blur(plane, &mut tmp, &mut scratch, w, h, r);
+        box_blur(&tmp, plane, &mut scratch, w, h, r);
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let a = planes[3][i].clamp(0.0, 1.0);
+            let (rr, gg, bb) = if a > 0.0 {
+                (planes[0][i] / a, planes[1][i] / a, planes[2][i] / a)
+            } else {
+                (0.0, 0.0, 0.0)
+            };
+            let o = (((y0 + y as u32) * own.width + (x0 + x as u32)) * 4) as usize;
+            own.data[o] = quantise(rr as f64 * 255.0);
+            own.data[o + 1] = quantise(gg as f64 * 255.0);
+            own.data[o + 2] = quantise(bb as f64 * 255.0);
+            own.data[o + 3] = quantise(a as f64 * 255.0);
+        }
     }
 }
 
@@ -1247,6 +1302,24 @@ mod tests {
         assert!(px(185, 90) > 5, "the glow reaches past the bar");
         assert!(px(185, 90) < 250, "but it falls off");
         assert!(px(4, 4) < 5, "and it does not reach the corner");
+    }
+
+    #[test]
+    fn a_blur_softens_the_edge_of_a_layer() {
+        let mut bar = rect("bar", [40.0, 40.0], Rgba::opaque(255, 255, 255));
+        bar.modifiers = vec![kinema_doc::Modifier {
+            kind: "blur".into(),
+            params: serde_json::json!({"radius": 18.0})
+                .as_object()
+                .unwrap()
+                .clone(),
+        }];
+        let doc = comp_of(vec![solid("bg", Rgba::opaque(0, 0, 0)), bar]);
+        let out = render_frame(&doc, "main", 0, 1.0).unwrap();
+        let px = |x: u32, y: u32| out.pixels[((y * out.width + x) * 4) as usize];
+        assert!(px(160, 90) > 200, "the middle stays bright");
+        assert!(px(183, 90) > 5, "light spills past the bar's edge");
+        assert!(px(4, 4) < 5, "and not to the corner");
     }
 
     #[test]

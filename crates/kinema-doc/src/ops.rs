@@ -3,7 +3,7 @@
 //! Every mutation is an `Op` that can be inverted, so the journal gives undo, diff and
 //! provenance for free. A path looks like `comp:main/layer:title/transform.position`.
 
-use crate::model::{Asset, Gradient, Layer, Look, Matte};
+use crate::model::{Asset, Gradient, Layer, Look, Matte, Modifier};
 use crate::{Doc, DocError, Prop};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -80,6 +80,15 @@ pub enum Op {
         #[serde(default)]
         reason: String,
     },
+    /// Replace a layer's modifiers, or clear them with `"modifiers": []`.
+    SetModifier {
+        comp: String,
+        layer: String,
+        #[serde(default)]
+        modifiers: Vec<Modifier>,
+        #[serde(default)]
+        reason: String,
+    },
     /// Point a layer at another as its alpha or luma matte, or clear it with `"mattes": null`.
     SetMattes {
         comp: String,
@@ -111,6 +120,7 @@ impl Op {
             | Op::RemoveAsset { reason, .. }
             | Op::SetLook { reason, .. }
             | Op::SetMattes { reason, .. }
+            | Op::SetModifier { reason, .. }
             | Op::SetGradient { reason, .. } => reason,
         }
     }
@@ -128,6 +138,7 @@ impl Op {
             Op::SetLook { .. } => "set-look",
             Op::SetGradient { .. } => "set-gradient",
             Op::SetMattes { .. } => "set-mattes",
+            Op::SetModifier { .. } => "set-modifier",
         }
     }
 }
@@ -291,6 +302,28 @@ fn inverse_of(before: &Doc, op: &Op) -> Result<Option<Op>, DocError> {
             })),
             None => Ok(None),
         },
+        Op::SetModifier {
+            comp,
+            layer,
+            reason,
+            ..
+        } => {
+            let c = before.comp(comp)?;
+            let l = c
+                .layers
+                .iter()
+                .find(|l| &l.id == layer)
+                .ok_or_else(|| DocError::NotFound {
+                    path: format!("comp:{comp}/layer:{layer}"),
+                    hint: "check the layer id".to_string(),
+                })?;
+            Ok(Some(Op::SetModifier {
+                comp: comp.clone(),
+                layer: layer.clone(),
+                modifiers: l.modifiers.clone(),
+                reason: format!("undo of: {reason}"),
+            }))
+        }
         Op::SetMattes {
             comp,
             layer,
@@ -471,6 +504,26 @@ impl Doc {
                     });
                 }
             }
+            Op::SetModifier {
+                comp,
+                layer,
+                modifiers,
+                ..
+            } => {
+                let c = self.comps.get_mut(comp).ok_or_else(|| DocError::NotFound {
+                    path: format!("comp:{comp}"),
+                    hint: "check the comp id".to_string(),
+                })?;
+                let l = c
+                    .layers
+                    .iter_mut()
+                    .find(|l| &l.id == layer)
+                    .ok_or_else(|| DocError::NotFound {
+                        path: format!("comp:{comp}/layer:{layer}"),
+                        hint: "check the layer id".to_string(),
+                    })?;
+                l.modifiers = modifiers.clone();
+            }
             Op::SetMattes {
                 comp,
                 layer,
@@ -573,6 +626,9 @@ pub fn op_schema() -> Value {
             {"type": "object", "required": ["op", "comp", "layer"],
              "properties": {"op": {"const": "set-mattes"}, "comp": {"type": "string"}, "layer": {"type": "string"}, "mattes": {"type": ["object", "null"]}, "reason": {"type": "string"}},
              "examples": [{"op": "set-mattes", "comp": "main", "layer": "title", "mattes": {"alpha": "accent"}, "reason": "cut the title to the rule"}]},
+            {"type": "object", "required": ["op", "comp", "layer"],
+             "properties": {"op": {"const": "set-modifier"}, "comp": {"type": "string"}, "layer": {"type": "string"}, "modifiers": {"type": "array"}, "reason": {"type": "string"}},
+             "examples": [{"op": "set-modifier", "comp": "main", "layer": "accent", "modifiers": [{"type": "glow", "radius": 40, "strength": 0.9, "color": "#4c8fff"}], "reason": "let the rule cast light"}]},
             {"type": "object", "required": ["op", "comp"],
              "properties": {"op": {"const": "create-comp"}, "comp": {"type": "string"}, "size": {"type": "array"}, "duration": {"type": "number"}, "layers": {"type": "array"}, "reason": {"type": "string"}},
              "examples": [{"op": "create-comp", "comp": "lower-third", "size": [1920, 400], "duration": 4, "reason": "a reusable strap"}]},
@@ -729,6 +785,32 @@ mod tests {
         assert_eq!(look.scale.base, 14.0);
         doc.apply(&res.inverse.unwrap()).unwrap();
         assert_eq!(doc.look, before, "undo restores the previous look");
+    }
+
+    #[test]
+    fn modifiers_can_be_set_and_undone() {
+        let mut doc = Doc::starter();
+        let op: Op = serde_json::from_value(json!({
+            "op": "set-modifier", "comp": "main", "layer": "accent",
+            "modifiers": [{"type": "glow", "radius": 40.0, "strength": 0.9}],
+            "reason": "test"
+        }))
+        .unwrap();
+        let res = doc.apply(&op).unwrap();
+        let accent = doc.comps["main"]
+            .layers
+            .iter()
+            .find(|l| l.id == "accent")
+            .unwrap();
+        assert_eq!(accent.modifiers.len(), 1);
+        assert_eq!(accent.modifiers[0].kind, "glow");
+        doc.apply(&res.inverse.unwrap()).unwrap();
+        let accent = doc.comps["main"]
+            .layers
+            .iter()
+            .find(|l| l.id == "accent")
+            .unwrap();
+        assert!(accent.modifiers.is_empty(), "undo clears the list");
     }
 
     #[test]
