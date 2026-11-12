@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+kinema-text.workspace = true
 kinema-time.workspace = true
 kinema-expr.workspace = true
 serde.workspace = true

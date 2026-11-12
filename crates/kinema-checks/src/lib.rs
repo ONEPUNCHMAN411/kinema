@@ -32,10 +32,16 @@ impl Defect {
     }
 }
 
-/// Faces shipped in this build. Anything else is a system fallback, which is a tell.
-pub const BUNDLED_FONTS: &[&str] = &["Inter"];
-/// Weights actually available. There is no 300, and there is no synthetic 500.
-pub const BUNDLED_WEIGHTS: &[u16] = &[400, 700];
+/// Families shipped in this build, taken from the text crate so the two cannot drift.
+/// Anything else is a machine fallback, which is a tell.
+pub fn bundled_fonts() -> Vec<&'static str> {
+    kinema_text::families()
+}
+
+/// Weights a family actually ships. Anything between them would be synthesised.
+pub fn bundled_weights(family: &str) -> Vec<u16> {
+    kinema_text::weights(family)
+}
 
 fn set_prop(path: String, value: Value, reason: &str) -> Value {
     json!({ "op": "set-prop", "path": path, "value": value, "reason": reason })
@@ -314,11 +320,21 @@ fn chroma(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
     }
 }
 
+fn join_weights(w: &[u16]) -> String {
+    w.iter()
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn type_fake(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
     let Ok(c) = doc.comp(comp) else { return };
     for layer in &c.layers {
         let Some(text) = &layer.text else { continue };
-        if text.italic {
+        let bundled = kinema_text::find(&text.font, text.weight, text.italic).is_some();
+        // A real italic is a separate face, not a slant. Only complain when the family
+        // genuinely has none.
+        if text.italic && bundled && !kinema_text::has_italic(&text.font) {
             out.push(Defect {
                 code: "TYPE-FAKE",
                 severity: "error",
@@ -326,7 +342,10 @@ fn type_fake(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
                 layer: Some(layer.id.clone()),
                 frame: None,
                 evidence: json!({ "reason": "synthetic oblique", "font": text.font }),
-                hint: "no italic face is bundled, so italic renders as a slanted copy; use weight or size for emphasis, or add a real italic face with `kin font add`".into(),
+                hint: format!(
+                    "{} ships no italic, so italic would render as a slanted copy; use weight or size for emphasis",
+                    text.font
+                ),
                 fix_op: Some(set_prop(
                     format!("comp:{comp}/layer:{}/text.italic", layer.id),
                     json!(false),
@@ -334,37 +353,40 @@ fn type_fake(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
                 )),
             });
         }
-        if !BUNDLED_WEIGHTS.contains(&text.weight) {
+        let available = kinema_text::weights(&text.font);
+        if bundled && !available.is_empty() && !available.contains(&text.weight) {
+            let nearest = available
+                .iter()
+                .min_by_key(|w| (**w as i64 - text.weight as i64).abs())
+                .copied()
+                .unwrap_or(400);
             out.push(Defect {
                 code: "TYPE-FAKE",
                 severity: "warn",
                 comp: comp.into(),
                 layer: Some(layer.id.clone()),
                 frame: None,
-                evidence: json!({ "reason": "weight not available", "weight": text.weight, "available": BUNDLED_WEIGHTS }),
-                hint: format!("requested weight {} is synthesised from {}", text.weight, BUNDLED_WEIGHTS[0]),
+                evidence: json!({ "reason": "weight not available", "weight": text.weight, "available": available }),
+                hint: format!("{} ships {}; asking for {} makes the renderer interpolate a fake cut", text.font, join_weights(&available), text.weight),
                 fix_op: Some(set_prop(
                     format!("comp:{comp}/layer:{}/text.weight", layer.id),
-                    json!(700),
+                    json!(nearest),
                     "snap to a real bundled weight",
                 )),
             });
         }
-        if !BUNDLED_FONTS
-            .iter()
-            .any(|f| f.eq_ignore_ascii_case(&text.font))
-        {
+        if !bundled {
             out.push(Defect {
                 code: "TYPE-FAKE",
                 severity: "warn",
                 comp: comp.into(),
                 layer: Some(layer.id.clone()),
                 frame: None,
-                evidence: json!({ "reason": "font not bundled", "font": text.font, "bundled": BUNDLED_FONTS }),
+                evidence: json!({ "reason": "font not bundled", "font": text.font, "bundled": bundled_fonts() }),
                 hint: "unbundled families fall back to whatever the machine has, so the render stops being reproducible".into(),
                 fix_op: Some(set_prop(
                     format!("comp:{comp}/layer:{}/text.font", layer.id),
-                    json!(BUNDLED_FONTS[0]),
+                    json!(kinema_text::DEFAULT_FAMILY),
                     "use a bundled family so the render is reproducible",
                 )),
             });
@@ -822,15 +844,53 @@ mod tests {
     }
 
     #[test]
-    fn fake_italic_is_caught() {
+    fn fake_italic_is_caught_only_for_a_family_with_no_italic() {
         let mut doc = Doc::starter();
         doc.comps.get_mut("main").unwrap().layers[2]
             .text
             .as_mut()
             .unwrap()
             .italic = true;
+        assert!(
+            !defects(&doc).iter().any(|d| d.code == "TYPE-FAKE"),
+            "Lato has a real italic, so italic is not a fake"
+        );
+
+        doc.comps.get_mut("main").unwrap().layers[2]
+            .text
+            .as_mut()
+            .unwrap()
+            .font = "Space Mono".into();
         let found = defects(&doc);
-        assert!(found.iter().any(|d| d.code == "TYPE-FAKE"));
+        assert!(
+            found
+                .iter()
+                .any(|d| d.code == "TYPE-FAKE" && d.evidence["reason"] == "synthetic oblique"),
+            "the mono has no italic, so asking for one is a synthetic oblique: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_weight_is_caught_and_snapped_to_a_real_one() {
+        let mut doc = Doc::starter();
+        doc.comps.get_mut("main").unwrap().layers[2]
+            .text
+            .as_mut()
+            .unwrap()
+            .weight = 300;
+        let found = defects(&doc);
+        let d = found
+            .iter()
+            .find(|d| d.code == "TYPE-FAKE" && d.evidence["reason"] == "weight not available")
+            .expect("weight defect");
+        assert_eq!(d.evidence["available"], serde_json::json!([400, 700]));
+        let op: kinema_doc::Op = serde_json::from_value(d.fix_op.clone().unwrap()).unwrap();
+        doc.apply(&op).unwrap();
+        assert_eq!(
+            doc.comps["main"].layers[2].text.as_ref().unwrap().weight,
+            400
+        );
+        assert!(!defects(&doc).iter().any(|d| d.code == "TYPE-FAKE"));
     }
 
     #[test]

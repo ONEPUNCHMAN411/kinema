@@ -4,9 +4,7 @@
 //! a PNG out. This is the reference renderer the GPU tier is checked against, so it
 //! stays deliberately small and obviously correct.
 
-pub mod font;
-
-use kinema_doc::{Blend, Doc, LayerKind, Rgba};
+pub use kinema_doc::{Blend, Doc, LayerKind, Rgba};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -162,7 +160,10 @@ impl Canvas {
         }
     }
 
-    /// Draw a block of lines inside a box, honouring alignment.
+    /// Draw a block of lines inside a box with a bundled face, honouring alignment.
+    ///
+    /// Glyphs are rasterised by the face itself and composited by coverage, so a 96 px
+    /// title is a real rendering of the outline rather than an enlarged pixel grid.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_text_block(
         &mut self,
@@ -170,6 +171,9 @@ impl Canvas {
         box_x: f64,
         box_y: f64,
         box_w: f64,
+        font: &str,
+        weight: u16,
+        italic: bool,
         size: f64,
         tracking: f64,
         line_height: f64,
@@ -178,68 +182,50 @@ impl Canvas {
         alpha: f64,
         mode: Blend,
     ) {
-        let unit = size / font::GLYPH_H as f64;
-        for (i, line) in text.split('\n').enumerate() {
-            let n = line.chars().count() as f64;
-            let line_w = if n == 0.0 {
-                0.0
-            } else {
-                (n * (kinema_doc::Text::ADVANCE * unit + tracking)
-                    - tracking
-                    - (kinema_doc::Text::ADVANCE - kinema_doc::Text::GLYPH_W) * unit)
-                    .max(0.0)
-            };
-            let x = match align {
-                kinema_doc::Align::Left => box_x,
-                kinema_doc::Align::Center => box_x + (box_w - line_w) / 2.0,
-                kinema_doc::Align::Right => box_x + box_w - line_w,
-            };
-            self.draw_text(
-                line,
-                x,
-                box_y + i as f64 * size * line_height,
-                size,
-                tracking,
-                color,
-                alpha,
-                mode,
-            );
-        }
-    }
-
-    /// Draw with the bitmap face. `y` is the top of the cap box.
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw_text(
-        &mut self,
-        text: &str,
-        x: f64,
-        y: f64,
-        size: f64,
-        tracking: f64,
-        color: Rgba,
-        alpha: f64,
-        mode: Blend,
-    ) {
-        let unit = size / font::GLYPH_H as f64;
-        let mut pen = x;
-        for ch in text.chars() {
-            let glyph = font::rows(ch);
-            for (row, bits) in glyph.iter().enumerate() {
-                for col in 0..font::GLYPH_W {
-                    if bits & (1 << (font::GLYPH_W - 1 - col)) != 0 {
-                        self.fill_rect(
-                            pen + col as f64 * unit,
-                            y + row as f64 * unit,
-                            unit,
-                            unit,
-                            color,
-                            alpha,
-                            mode,
-                        );
+        let align = match align {
+            kinema_doc::Align::Left => kinema_text::Align::Left,
+            kinema_doc::Align::Center => kinema_text::Align::Center,
+            kinema_doc::Align::Right => kinema_text::Align::Right,
+        };
+        let placed = kinema_text::layout(
+            text,
+            font,
+            weight,
+            italic,
+            size as f32,
+            tracking as f32,
+            line_height as f32,
+            align,
+            box_x as f32,
+            box_y as f32,
+            box_w as f32,
+        );
+        for p in placed {
+            if p.ch.is_whitespace() {
+                continue;
+            }
+            let (metrics, bitmap) = p.face.rasterize(p.ch, size as f32);
+            if metrics.width == 0 || metrics.height == 0 {
+                continue;
+            }
+            let (gx, gy) = kinema_text::glyph_origin(&p, &metrics);
+            for row in 0..metrics.height {
+                let y = (gy + row as f32).floor();
+                if !(0.0..self.height as f32).contains(&y) {
+                    continue;
+                }
+                for col in 0..metrics.width {
+                    let coverage = bitmap[row * metrics.width + col] as f64 / 255.0;
+                    if coverage <= 0.0 {
+                        continue;
                     }
+                    let x = (gx + col as f32).floor();
+                    if !(0.0..self.width as f32).contains(&x) {
+                        continue;
+                    }
+                    self.composite(x as u32, y as u32, color, coverage * alpha, mode);
                 }
             }
-            pen += kinema_doc::Text::ADVANCE * unit + tracking;
         }
     }
 
@@ -378,6 +364,9 @@ fn draw_at(
                     bx,
                     by,
                     bw,
+                    &text.font,
+                    text.weight,
+                    text.italic,
                     text.size * scale,
                     text.tracking * scale,
                     text.line_height,
@@ -519,19 +508,34 @@ mod tests {
 
     #[test]
     fn text_puts_ink_on_the_canvas() {
-        let mut canvas = Canvas::new(400, 120);
-        canvas.draw_text(
+        let mut canvas = Canvas::new(500, 140);
+        canvas.draw_text_block(
             "HELLO",
             10.0,
             10.0,
+            480.0,
+            "Lato",
+            700,
+            false,
             70.0,
             0.0,
+            1.2,
+            kinema_doc::Align::Left,
             Rgba::WHITE,
             1.0,
             Blend::Normal,
         );
         let inked = canvas.data.chunks(4).filter(|p| p[3] > 0).count();
-        assert!(inked > 500, "expected letterforms, got {inked} pixels");
+        assert!(inked > 2000, "expected letterforms, got {inked} pixels");
+        let partial = canvas
+            .data
+            .chunks(4)
+            .filter(|p| p[3] > 0 && p[3] < 255)
+            .count();
+        assert!(
+            partial > 200,
+            "a real outline is antialiased, so edges are partial coverage; got {partial}"
+        );
     }
 
     #[test]
@@ -542,6 +546,9 @@ mod tests {
             0.0,
             10.0,
             400.0,
+            "Lato",
+            400,
+            false,
             60.0,
             0.0,
             1.2,
@@ -551,9 +558,12 @@ mod tests {
             Blend::Normal,
         );
         let row_has_ink = |y: usize| (0..400).any(|x| canvas.get(x as u32, y as u32).a > 0);
-        assert!(row_has_ink(20), "first line should be near the top");
-        assert!(row_has_ink(90), "second line should be a leading lower");
-        assert!(!row_has_ink(200), "the block should not reach the bottom");
+        // Box top is 10; the first baseline sits one ascent below it, so caps start around
+        // row 26. The second line is one 1.2 leading (72 px) lower.
+        assert!(row_has_ink(45), "first line should be in the top band");
+        assert!(row_has_ink(120), "second line should be a leading lower");
+        assert!(!row_has_ink(85), "the two lines should not touch");
+        assert!(!row_has_ink(240), "the block should not reach the bottom");
     }
 
     #[test]
@@ -565,6 +575,9 @@ mod tests {
                 0.0,
                 0.0,
                 400.0,
+                "Lato",
+                400,
+                false,
                 60.0,
                 0.0,
                 1.2,
@@ -574,7 +587,7 @@ mod tests {
                 Blend::Normal,
             );
             (0..400)
-                .find(|x| canvas.get(*x as u32, 10).a > 0)
+                .find(|x| (0..100).any(|y| canvas.get(*x as u32, y).a > 0))
                 .unwrap_or(999)
         };
         let left = ink_x(kinema_doc::Align::Left);
@@ -634,7 +647,7 @@ mod tests {
         let doc = Doc::starter();
         let out = render_frame(&doc, "main", 30, 1.0).unwrap();
         let hash = blake3::hash(&out.pixels).to_hex().to_string();
-        const EXPECTED: &str = "626b5d1ea356890569c3c7d335365c9a5cf2ef42868c82c5d09a4e3f427b3ca6";
+        const EXPECTED: &str = "d42ffd18561bee9de0e30958a4a1c4491dd8cb68692363eea0ad4f976c9b25de";
         if std::env::var("KINEMA_BLESS").is_ok() {
             panic!("bless: {hash}");
         }

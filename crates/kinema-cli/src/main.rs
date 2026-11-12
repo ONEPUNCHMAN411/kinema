@@ -61,6 +61,7 @@ fn dispatch(argv: &[String]) -> R {
     let verb = argv.first().map(String::as_str).unwrap_or("help");
     match verb {
         "capabilities" => Ok(capabilities()),
+        "fonts" | "typefaces" => Ok(cmd_fonts()),
         "schema" => Ok(schema::doc_schema()),
         "help" | "--help" | "-h" => Ok(help()),
         "version" | "--version" | "-V" => {
@@ -93,8 +94,8 @@ fn not_implemented(verb: &str) -> Value {
             "P5",
         ),
         "capture" => ("deterministic capture lands in P5", "P5"),
-        "font" | "typeface" | "type" => (
-            "the font library and modular scale land in P4; this build draws a bitmap face",
+        "font" => (
+            "bundled faces are read-only in this build; `kin fonts` lists them, and adding faces lands in P4",
             "P4",
         ),
         "palette" => (
@@ -116,7 +117,7 @@ fn not_implemented(verb: &str) -> Value {
             "planned": phase,
             "fix_op": null,
             "doc": "docs/PLAN.md#plan",
-            "verbs": ["capabilities", "schema", "new", "probe", "apply", "render", "check", "credits", "log"],
+            "verbs": ["capabilities", "fonts", "schema", "new", "probe", "apply", "render", "check", "credits", "log", "diff"],
         }
     })
 }
@@ -176,8 +177,7 @@ fn capabilities() -> Value {
             "functions": kinema_expr::FUNCTIONS.iter().map(|(n, d)| json!({"name": n, "usage": d})).collect::<Vec<_>>(),
             "bounded": ["no loops, no assignment, no I/O", "4096 byte source", "32 deep", "20000 steps"],
         },
-        "fonts": checks::BUNDLED_FONTS,
-        "weights": checks::BUNDLED_WEIGHTS,
+        "fonts": fonts_catalogue(),
         "path_syntax": "comp:main/layer:title/transform.position",
         "projection": "every verb accepts --fields a,b to keep only those top-level keys",
         "error_contract": {"code": "string", "message": "string", "hint": "string", "fix_op": "op|null", "doc": "string"},
@@ -185,11 +185,59 @@ fn capabilities() -> Value {
     })
 }
 
+/// The bundle as data: what a document may name, what each family ships, and where its
+/// licence text lives.
+fn fonts_catalogue() -> Value {
+    let families: Vec<Value> = kinema_text::families()
+        .iter()
+        .map(|family| {
+            let faces: Vec<Value> = kinema_text::FACES
+                .iter()
+                .filter(|f| f.family == *family)
+                .map(|f| {
+                    json!({
+                        "weight": f.weight,
+                        "italic": f.italic,
+                        "file": f.file,
+                        "spdx": f.spdx,
+                        "author": f.author,
+                        "licence_file": f.licence_file,
+                    })
+                })
+                .collect();
+            json!({
+                "family": family,
+                "weights": kinema_text::weights(family),
+                "italic": kinema_text::has_italic(family),
+                "faces": faces,
+            })
+        })
+        .collect();
+    json!({
+        "families": families,
+        "default": kinema_text::DEFAULT_FAMILY,
+        "bundled": true,
+        "note": "names are exact; anything else falls back and TYPE-FAKE reports it",
+    })
+}
+
+fn cmd_fonts() -> Value {
+    json!({
+        "ok": true,
+        "fonts": fonts_catalogue(),
+        "advice": [
+            "pair a grotesque with a mono, and let weight carry hierarchy",
+            "there is no italic for the mono: emphasis there is weight or size, never a slant",
+            "the faces are OFL, so `kin credits` already includes their attribution"
+        ],
+    })
+}
+
 fn help() -> Value {
     json!({
         "ok": true,
         "usage": "kin <verb> [args] [--project <dir>] [--pretty]",
-        "verbs": ["capabilities", "schema", "new", "probe", "apply", "render", "check", "credits", "log"],
+        "verbs": ["capabilities", "fonts", "schema", "new", "probe", "apply", "render", "check", "credits", "log", "diff"],
         "examples": [
             "kin new demo",
             "kin render --project demo --frame 0 -o demo/frame0.png",

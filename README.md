@@ -44,7 +44,9 @@ Built:
 - `kinema-doc` — the document, properties (`value | kf | expr | link | graph`), typed ops
   with inverses, and an append-only journal.
 - `kinema-deps` — canonical JSON and content hashes for documents, layers and frames.
-- `kinema-raster` — CPU RGBA canvas, blend modes, bitmap text, motion blur by subframe
+- `kinema-text` — real faces, bundled: measurement, kerning, line layout, alignment and
+  antialiased glyph rasterisation, with licence and attribution carried as data.
+- `kinema-raster` — CPU RGBA canvas, blend modes, real type, motion blur by subframe
   integration, PNG out.
 - `kinema-checks` — the first craft detectors with `fix_op` remedies.
 - `kinema-cli` — `kin` itself, including asset records with looked-up licences and
@@ -52,8 +54,11 @@ Built:
 
 The document supports `solid`, `text` and `shape` layers; properties support constants,
 keyframes, links and expressions. `graph` returns a typed `not-implemented` with a hint
-that names the phase. Text is drawn with a built-in 5 x 7 bitmap face — `Inter` at 400 and 700
-are the only declared faces, and `TYPE-FAKE` says so when a document asks for others.
+that names the phase. Text is set in real bundled faces: **Lato** (400, 700 and a real
+italic) and **Space Mono** (400, 700), each OFL-1.1 with its licence text beside it in
+`assets/fonts`. `kin fonts` lists them with attribution, and `TYPE-FAKE` reports a family,
+weight or italic the bundle does not actually ship — there is no synthetic oblique and no
+invented 500.
 
 Re-rendering a sequence only redraws frames whose identity changed: a frame is hashed
 from the layers actually on screen at that instant, so editing an off-screen layer keeps
@@ -90,7 +95,7 @@ kin check --project demo         # craft defects with fix_op remedies
 kin check --project demo --fix   # apply them until nothing fixable is left
 kin credits --project demo       # licence summary and release gate
 kin log --project demo           # the op journal
-kin credits --project demo       # licence roll-up and release gate
+kin fonts                        # bundled families, weights, licence and attribution
 kin asset add still.png --project demo --spdx cc-by-4.0 --source-url <url> --author <name>
 kin undo --project demo          # replay the journal's inverses
 kin verify --project demo --manifest demo/frames/manifest.json --render

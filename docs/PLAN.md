@@ -53,6 +53,13 @@ tokens. Kinema supplies both.
 - `typeface recommend --for "editorial explainer" --roles display,body,mono` returns real
   pairings with reasons. `type set --scale 1.25` applies a modular scale with per-size
   tracking and leading.
+
+Built in P0: `kinema-text` bundles five faces (`Lato` 400/700/italic, `Space Mono`
+400/700) with their OFL text, resolves family + weight + style to a real face, lays out
+lines with kerning, tracking, leading and alignment, and rasterises outlines with
+coverage. `kin fonts` is the catalogue; `TYPE-FAKE` now fires only where the bundle truly
+has no such face. The ~40-family library, classification fields, pairings and
+`typeface recommend` remain P4.
 - `palette from <image|brand|video>` extracts in OKLab, assigns roles (bg, surface, text,
   muted, accent), gamut-maps to Rec.709 so video never clips, and proves every
   text-on-surface pair with contrast ratios. One accent, one neutral ramp, no rainbow

@@ -203,7 +203,7 @@ fn default_line_height() -> f64 {
 }
 
 fn default_font() -> String {
-    "Inter".to_string()
+    kinema_text::DEFAULT_FAMILY.to_string()
 }
 
 fn default_weight() -> u16 {
@@ -211,47 +211,37 @@ fn default_weight() -> u16 {
 }
 
 impl Text {
-    /// Glyph box is 5 x 7 units, the bitmap face in `kinema-raster`.
-    pub const GLYPH_W: f64 = 5.0;
-    pub const GLYPH_H: f64 = 7.0;
-    pub const ADVANCE: f64 = 6.0;
-
-    pub fn unit(&self) -> f64 {
-        self.size / Self::GLYPH_H
-    }
-
-    /// Advance width of one character in pixels.
-    pub fn advance(&self) -> f64 {
-        Self::ADVANCE * self.unit() + self.tracking
-    }
-
     pub fn lines(&self) -> Vec<&str> {
         self.string.split('\n').collect()
     }
 
-    /// Advance width of one line, in pixels.
+    /// Advance width of one line in pixels, from the real face's glyph advances plus
+    /// tracking.
     pub fn line_width(&self, line: &str) -> f64 {
-        let n = line.chars().count() as f64;
-        if n == 0.0 {
-            return 0.0;
-        }
-        let unit = self.unit();
-        let width = n * (Self::ADVANCE * unit + self.tracking)
-            - self.tracking
-            - (Self::ADVANCE - Self::GLYPH_W) * unit;
-        width.max(0.0)
+        kinema_text::line_width(
+            &self.font,
+            self.weight,
+            self.italic,
+            line,
+            self.size as f32,
+            self.tracking as f32,
+        ) as f64
     }
 
-    /// `[width, height]` of the text block. One line is exactly the type size tall, so
-    /// documents that never use a newline keep their geometry.
+    /// `[width, height]` of the block. Height is the face's own ascent plus descent for one
+    /// line, plus the leading between further lines — so a box is as tall as its ink, not as
+    /// tall as the em square.
     pub fn metrics(&self) -> [f64; 2] {
-        let lines = self.lines();
-        let width = lines
-            .iter()
-            .map(|l| self.line_width(l))
-            .fold(0.0f64, f64::max);
-        let height = self.size * (1.0 + (lines.len() as f64 - 1.0) * self.line_height);
-        [width, height.max(0.0)]
+        let (w, h) = kinema_text::measure(
+            &self.string,
+            &self.font,
+            self.weight,
+            self.italic,
+            self.size as f32,
+            self.tracking as f32,
+            self.line_height as f32,
+        );
+        [w as f64, h as f64]
     }
 }
 
@@ -439,7 +429,7 @@ impl Doc {
                 text: Some(Text {
                     string: "HELLO KINEMA".into(),
                     size: 96.0,
-                    font: "Inter".into(),
+                    font: kinema_text::DEFAULT_FAMILY.into(),
                     color: Rgba::opaque(0xf4, 0xf6, 0xfa),
                     weight: 700,
                     italic: false,
@@ -651,7 +641,7 @@ mod tests {
         let mut t = Text {
             string: "HELLO".into(),
             size: 70.0,
-            font: "Inter".into(),
+            font: "Lato".into(),
             color: Rgba::WHITE,
             weight: 400,
             italic: false,
@@ -662,8 +652,8 @@ mod tests {
         let small = t.metrics();
         t.size = 140.0;
         let large = t.metrics();
-        assert!((large[0] / small[0] - 2.0).abs() < 1e-9);
-        assert!((large[1] - 140.0).abs() < 1e-9);
+        assert!((large[0] / small[0] - 2.0).abs() < 1e-3);
+        assert!((large[1] / small[1] - 2.0).abs() < 1e-3);
     }
 
     #[test]
@@ -671,7 +661,7 @@ mod tests {
         let mut t = Text {
             string: "ONE\nTWO TWO".into(),
             size: 50.0,
-            font: "Inter".into(),
+            font: "Lato".into(),
             color: Rgba::WHITE,
             weight: 400,
             italic: false,
@@ -680,15 +670,21 @@ mod tests {
             line_height: 1.5,
         };
         let two = t.metrics();
-        // Two lines at 1.5 leading: 50 + 75.
-        assert!((two[1] - 125.0).abs() < 1e-9, "{}", two[1]);
         assert_eq!(t.lines().len(), 2);
         // The widest line sets the block width.
-        assert!((two[0] - t.line_width("TWO TWO")).abs() < 1e-9);
+        assert!((two[0] - t.line_width("TWO TWO")).abs() < 1e-3);
+        // The second line sits one leading (50 x 1.5) below the first.
         t.string = "ONE".into();
+        let one = t.metrics();
         assert!(
-            (t.metrics()[1] - 50.0).abs() < 1e-9,
-            "a single line is one size tall, so old documents keep their geometry"
+            (two[1] - one[1] - 75.0).abs() < 1e-3,
+            "{} {}",
+            two[1],
+            one[1]
+        );
+        assert!(
+            (one[1] - t.size * 1.2).abs() < t.size * 0.25,
+            "a line is about its em box tall"
         );
     }
 
