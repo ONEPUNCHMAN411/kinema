@@ -552,6 +552,10 @@ pub enum RenderError {
         why: String,
         fix_op: Option<Value>,
     },
+    Modifier {
+        layer: String,
+        kind: String,
+    },
 }
 
 impl RenderError {
@@ -579,6 +583,15 @@ impl RenderError {
                 "hint": "run `kin check` to see structural problems",
                 "fix_op": null,
                 "doc": "docs/PLAN.md#document",
+            }),
+            RenderError::Modifier { layer, kind } => json!({
+                "code": "modifier",
+                "message": format!("the CPU tier does not know the `{kind}` modifier"),
+                "hint": "this build applies `glow`",
+                "fix_op": null,
+                "doc": "docs/PLAN.md#layers",
+                "layer": layer,
+                "kind": kind,
             }),
             RenderError::Comp {
                 layer,
@@ -673,10 +686,63 @@ fn draw_at(
             .eval_layer(comp, layer, t)
             .map_err(|e| RenderError::Doc(e.to_string()))?;
         let alpha = ev.opacity;
+        let matte = layer.mattes.as_ref();
+        let offscreen = matte.is_some() || !layer.modifiers.is_empty();
+
+        if !offscreen {
+            if !draw_layer(
+                &mut canvas,
+                doc,
+                comp,
+                layer,
+                &ev,
+                scale,
+                t,
+                layer.blend,
+                stack,
+                depth,
+            )? {
+                skipped.insert(layer.id.clone());
+                continue;
+            }
+            drawn.push(RenderedLayer {
+                id: layer.id.clone(),
+                kind: layer.kind.as_str(),
+                opacity: alpha,
+                matte: None,
+            });
+            continue;
+        }
 
         // A matte is built in canvas space, so the matte layer's own transform decides
-        // where it cuts: that is the whole point of using one.
-        if let Some(m) = &layer.mattes {
+        // where it cuts: that is the whole point of using one. Modifiers need the layer
+        // on its own canvas for a different reason: a glow is made from its coverage.
+        let mut own = Canvas::new(width, height);
+        if !draw_layer(
+            &mut own,
+            doc,
+            comp,
+            layer,
+            &ev,
+            scale,
+            t,
+            Blend::Normal,
+            stack,
+            depth,
+        )? {
+            skipped.insert(layer.id.clone());
+            continue;
+        }
+
+        // Glow goes under the layer, onto the frame, so the layer itself stays sharp.
+        let [bx, by, bw, bh] = ev.bbox;
+        let bbox = [bx * scale, by * scale, bw * scale, bh * scale];
+        for m in &layer.modifiers {
+            apply_modifier(&mut canvas, &own, layer, bbox, m, scale)?;
+        }
+
+        let mut matte_desc = None;
+        if let Some(m) = matte {
             let (source, luma) = match (&m.luma, &m.alpha) {
                 (Some(id), _) => (id, true),
                 (None, Some(id)) => (id, false),
@@ -698,22 +764,6 @@ fn draw_at(
                     ),
                 });
             };
-            let mut own = Canvas::new(width, height);
-            if !draw_layer(
-                &mut own,
-                doc,
-                comp,
-                layer,
-                &ev,
-                scale,
-                t,
-                Blend::Normal,
-                stack,
-                depth,
-            )? {
-                skipped.insert(layer.id.clone());
-                continue;
-            }
             let mut mask = Canvas::new(width, height);
             if t >= src.start && t < src.start + src.duration {
                 let sev = doc
@@ -733,43 +783,168 @@ fn draw_at(
                 )?;
             }
             own.mask_by(&mask, luma);
-            canvas.composite_from(&own, layer.blend);
-            drawn.push(RenderedLayer {
-                id: layer.id.clone(),
-                kind: layer.kind.as_str(),
-                opacity: alpha,
-                matte: Some(format!(
-                    "{} through `{source}`",
-                    if luma { "luma" } else { "alpha" }
-                )),
-            });
-            continue;
+            matte_desc = Some(format!(
+                "{} through `{source}`",
+                if luma { "luma" } else { "alpha" }
+            ));
         }
-
-        if !draw_layer(
-            &mut canvas,
-            doc,
-            comp,
-            layer,
-            &ev,
-            scale,
-            t,
-            layer.blend,
-            stack,
-            depth,
-        )? {
-            skipped.insert(layer.id.clone());
-            continue;
-        }
+        canvas.composite_from(&own, layer.blend);
         drawn.push(RenderedLayer {
             id: layer.id.clone(),
             kind: layer.kind.as_str(),
             opacity: alpha,
-            matte: None,
+            matte: matte_desc,
         });
     }
 
     Ok((canvas, drawn, skipped.into_iter().collect()))
+}
+
+/// Apply one modifier to the frame, reading the layer's own coverage as the source.
+///
+/// An unknown type is an error with the layer named: silently ignoring a modifier is
+/// exactly how a document ends up not looking like what it says.
+fn apply_modifier(
+    canvas: &mut Canvas,
+    own: &Canvas,
+    layer: &kinema_doc::Layer,
+    bbox: [f64; 4],
+    m: &kinema_doc::Modifier,
+    scale: f64,
+) -> Result<(), RenderError> {
+    let num = |key: &str, default: f64| -> f64 {
+        m.params
+            .get(key)
+            .and_then(|v| v.as_f64())
+            .unwrap_or(default)
+    };
+    match m.kind.as_str() {
+        "glow" => {
+            let color = m
+                .params
+                .get("color")
+                .and_then(|v| serde_json::from_value::<Rgba>(v.clone()).ok())
+                .unwrap_or(Rgba::opaque(255, 255, 255));
+            // Only the layer's own box, grown by the radius, can be lit. Working over the
+            // whole canvas made a 40 px glow cost more than the rest of the frame.
+            let pad = num("radius", 24.0) * scale;
+            let [bx, by, bw, bh] = bbox;
+            let rect = [
+                (bx - pad).floor().max(0.0) as u32,
+                (by - pad).floor().max(0.0) as u32,
+                ((bx + bw + pad).ceil() as i64).clamp(0, canvas.width as i64) as u32,
+                ((by + bh + pad).ceil() as i64).clamp(0, canvas.height as i64) as u32,
+            ];
+            glow(
+                canvas,
+                own,
+                rect,
+                num("radius", 24.0) * scale,
+                num("strength", 0.5),
+                color,
+            );
+            Ok(())
+        }
+        other => Err(RenderError::Modifier {
+            layer: layer.id.clone(),
+            kind: other.to_string(),
+        }),
+    }
+}
+
+/// A blurred copy of the layer's coverage, added to the frame as light.
+///
+/// Only `rect` is considered: the layer's box grown by the radius. Everything outside it is
+/// known to be unlit.
+fn glow(
+    canvas: &mut Canvas,
+    own: &Canvas,
+    rect: [u32; 4],
+    radius: f64,
+    strength: f64,
+    color: Rgba,
+) {
+    if strength <= 0.0 {
+        return;
+    }
+    let [x0, y0, x1, y1] = rect;
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    let r = (radius.max(1.0) / 3.0).round().max(1.0) as usize;
+    let mut a: Vec<f32> = Vec::with_capacity(w * h);
+    for y in 0..h {
+        for x in 0..w {
+            a.push(own.get(x0 + x as u32, y0 + y as u32).a as f32 / 255.0);
+        }
+    }
+    let mut tmp = vec![0f32; a.len()];
+    let mut scratch = vec![0f32; a.len()];
+    // Three box passes are close enough to a gaussian that the falloff reads smooth.
+    for _ in 0..3 {
+        box_blur(&a, &mut tmp, &mut scratch, w, h, r);
+        box_blur(&tmp, &mut a, &mut scratch, w, h, r);
+    }
+    for (i, cover) in a.iter().enumerate() {
+        let cover = (cover * strength as f32).min(1.0) as f64;
+        if cover <= 0.002 {
+            continue;
+        }
+        let (px, py) = (x0 + (i % w) as u32, y0 + (i / w) as u32);
+        canvas.composite(
+            px,
+            py,
+            Rgba::opaque(color.r, color.g, color.b),
+            cover,
+            Blend::Screen,
+        );
+    }
+}
+
+/// Separable box blur with a sliding window, so the cost does not depend on the radius.
+///
+/// Each pixel costs two adds: one sample leaving the window and one entering it. Summing
+/// the window per pixel instead turns a 40 px glow into hundreds of millions of adds, which
+/// is how this first measured 614 ms a frame.
+fn box_blur(src: &[f32], dst: &mut [f32], scratch: &mut [f32], w: usize, h: usize, r: usize) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    // Zero padding, not clamped edges: outside the box the layer has no coverage, so a
+    // clamped edge would invent light along the crop boundary.
+    let norm = 1.0 / (2 * r + 1) as f32;
+    for y in 0..h {
+        let row = y * w;
+        let mut sum: f32 = (0..=r.min(w - 1)).map(|x| src[row + x]).sum();
+        scratch[row] = sum * norm;
+        for x in 1..w {
+            let leaving = x as i64 - 1 - r as i64;
+            if leaving >= 0 {
+                sum -= src[row + leaving as usize];
+            }
+            let entering = x + r;
+            if entering < w {
+                sum += src[row + entering];
+            }
+            scratch[row + x] = sum * norm;
+        }
+    }
+    for x in 0..w {
+        let mut sum: f32 = (0..=r.min(h - 1)).map(|y| scratch[y * w + x]).sum();
+        dst[x] = sum * norm;
+        for y in 1..h {
+            let leaving = y as i64 - 1 - r as i64;
+            if leaving >= 0 {
+                sum -= scratch[leaving as usize * w + x];
+            }
+            let entering = y + r;
+            if entering < h {
+                sum += scratch[entering * w + x];
+            }
+            dst[y * w + x] = sum * norm;
+        }
+    }
 }
 
 /// Every layer id that some layer in `c` uses as a matte.
@@ -1054,6 +1229,36 @@ mod tests {
         c.shutter = 0.0;
         c.layers = layers;
         doc
+    }
+
+    #[test]
+    fn a_glow_puts_light_around_a_layer() {
+        let mut bar = rect("bar", [40.0, 40.0], Rgba::opaque(255, 255, 255));
+        bar.modifiers = vec![kinema_doc::Modifier {
+            kind: "glow".into(),
+            params: json!({"radius": 30.0, "strength": 0.8, "color": "#ffffff"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        }];
+        let doc = comp_of(vec![solid("bg", Rgba::opaque(0, 0, 0)), bar]);
+        let out = render_frame(&doc, "main", 0, 1.0).unwrap();
+        let px = |x: u32, y: u32| out.pixels[((y * out.width + x) * 4) as usize];
+        assert!(px(185, 90) > 5, "the glow reaches past the bar");
+        assert!(px(185, 90) < 250, "but it falls off");
+        assert!(px(4, 4) < 5, "and it does not reach the corner");
+    }
+
+    #[test]
+    fn an_unknown_modifier_is_an_error() {
+        let mut bar = rect("bar", [10.0, 10.0], Rgba::opaque(255, 255, 255));
+        bar.modifiers = vec![kinema_doc::Modifier {
+            kind: "bloom".into(),
+            params: serde_json::Map::new(),
+        }];
+        let doc = comp_of(vec![bar]);
+        let err = render_frame(&doc, "main", 0, 1.0).unwrap_err();
+        assert_eq!(err.to_json()["code"], "modifier");
     }
 
     #[test]
