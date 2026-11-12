@@ -140,6 +140,24 @@ impl Canvas {
         let (x0, y0) = (x.floor().max(0.0) as u32, y.floor().max(0.0) as u32);
         let x1 = ((x + w).ceil() as i64).clamp(0, self.width as i64) as u32;
         let y1 = ((y + h).ceil() as i64).clamp(0, self.height as i64) as u32;
+
+        // An opaque normal-blend rect that covers the canvas is a memcpy: the coverage
+        // maths below would compute exactly this colour for every pixel, two million times.
+        if matches!(mode, Blend::Normal)
+            && alpha >= 1.0
+            && color.a == 255
+            && x0 == 0
+            && y0 == 0
+            && x1 >= self.width
+            && y1 >= self.height
+        {
+            let px = [color.r, color.g, color.b, 255u8];
+            for out in self.data.as_chunks_mut::<4>().0 {
+                *out = px;
+            }
+            return;
+        }
+
         for py in y0..y1 {
             let cy = ((py as f64 + 1.0).min(y + h) - (py as f64).max(y)).max(0.0);
             for px in x0..x1 {
@@ -219,7 +237,10 @@ impl Canvas {
             if alpha <= 0.0 {
                 continue;
             }
-            let (metrics, bitmap) = p.face.rasterize(p.ch, d.size as f32);
+            // Glyphs repeat across subframes and across frames of a sequence, so this
+            // comes from the face's cache rather than re-rasterising the outline.
+            let glyph = p.face.glyph(p.ch, d.size as f32);
+            let (metrics, bitmap) = (glyph.0, glyph.1.as_slice());
             if metrics.width == 0 || metrics.height == 0 {
                 continue;
             }

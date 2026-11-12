@@ -6,7 +6,8 @@
 //! rather than silently substituting something the reviewer never saw.
 
 use fontdue::{Font, FontSettings};
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// The metadata that travels with a bundled face. Licence and attribution are data, not
 /// prose buried in a README.
@@ -98,7 +99,9 @@ pub const DEFAULT_FAMILY: &str = "Lato";
 
 pub struct Face {
     pub info: &'static FaceInfo,
-    font: Font,
+    bytes: &'static [u8],
+    /// Parsed on first use: a render that sets one weight should not pay for five faces.
+    font: OnceLock<Font>,
 }
 
 impl std::fmt::Debug for Face {
@@ -113,18 +116,61 @@ impl std::fmt::Debug for Face {
     }
 }
 
+/// Rasterised coverage, shared between every use of the same glyph at the same size.
+/// Motion blur redraws each subframe, and a sequence redraws the same glyph every frame,
+/// so without this the outline is rasterised dozens of times for one pixel-identical result.
+type Glyph = Arc<(fontdue::Metrics, Vec<u8>)>;
+
+type GlyphKey = (usize, char, i32);
+type GlyphCache = Mutex<HashMap<GlyphKey, Glyph>>;
+
+fn glyph_cache() -> &'static GlyphCache {
+    static CACHE: OnceLock<GlyphCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 impl Face {
+    fn font(&self) -> &Font {
+        self.font.get_or_init(|| {
+            Font::from_bytes(self.bytes, FontSettings::default()).expect("bundled face must parse")
+        })
+    }
+
     pub fn rasterize(&self, ch: char, size: f32) -> (fontdue::Metrics, Vec<u8>) {
-        self.font.rasterize(ch, size.max(1.0))
+        self.font().rasterize(ch, size.max(1.0))
+    }
+
+    fn index(&self) -> usize {
+        FACES
+            .iter()
+            .position(|f| std::ptr::eq(f, self.info))
+            .unwrap_or(0)
+    }
+
+    /// The glyph's metrics and coverage at this size, from the cache when possible.
+    pub fn glyph(&self, ch: char, size: f32) -> Glyph {
+        // A thousandth of a pixel is finer than any size a document can express.
+        let key = (self.index(), ch, (size.max(1.0) * 1000.0).round() as i32);
+        if let Ok(cache) = glyph_cache().lock() {
+            if let Some(hit) = cache.get(&key) {
+                return hit.clone();
+            }
+        }
+        let (metrics, bitmap) = self.rasterize(ch, size);
+        let glyph: Glyph = Arc::new((metrics, bitmap));
+        if let Ok(mut cache) = glyph_cache().lock() {
+            cache.insert(key, glyph.clone());
+        }
+        glyph
     }
 
     pub fn metrics(&self, ch: char, size: f32) -> fontdue::Metrics {
-        self.font.metrics(ch, size.max(1.0))
+        self.font().metrics(ch, size.max(1.0))
     }
 
     /// Ascent and descent in pixels, descent given as a positive distance.
     pub fn vertical(&self, size: f32) -> (f32, f32) {
-        match self.font.horizontal_line_metrics(size.max(1.0)) {
+        match self.font().horizontal_line_metrics(size.max(1.0)) {
             Some(m) => (m.ascent, m.descent.abs()),
             // Every bundled face has hhea metrics; this is only a safety net.
             None => (size * 0.8, size * 0.2),
@@ -132,7 +178,7 @@ impl Face {
     }
 
     pub fn kern(&self, left: char, right: char, size: f32) -> f32 {
-        self.font
+        self.font()
             .horizontal_kern(left, right, size.max(1.0))
             .unwrap_or(0.0)
     }
@@ -144,11 +190,11 @@ fn registry() -> &'static Vec<Face> {
         let bytes: [&'static [u8]; 5] = [LATO_R, LATO_B, LATO_I, MONO_R, MONO_B];
         FACES
             .iter()
-            .zip(bytes.iter())
+            .zip(bytes)
             .map(|(info, data)| Face {
                 info,
-                font: Font::from_bytes(*data, FontSettings::default())
-                    .expect("bundled face must parse"),
+                bytes: data,
+                font: OnceLock::new(),
             })
             .collect()
     })
