@@ -43,7 +43,8 @@ Built:
 - `kinema-deps` — canonical JSON and content hashes for documents, layers and frames.
 - `kinema-raster` — CPU RGBA canvas, blend modes, bitmap text, PNG out.
 - `kinema-checks` — the first craft detectors with `fix_op` remedies.
-- `kinema-cli` — `kin` itself.
+- `kinema-cli` — `kin` itself, including asset records with looked-up licences and
+  `undo` driven by the journal's stored inverses.
 
 The document supports `solid`, `text` and `shape` layers; properties support constants,
 keyframes, links and expressions. `graph` returns a typed `not-implemented` with a hint
@@ -80,6 +81,10 @@ kin check --project demo         # craft defects with fix_op remedies
 kin check --project demo --fix   # apply them until nothing fixable is left
 kin credits --project demo       # licence summary and release gate
 kin log --project demo           # the op journal
+kin credits --project demo       # licence roll-up and release gate
+kin asset add still.png --project demo --spdx cc-by-4.0 --source-url <url> --author <name>
+kin undo --project demo          # replay the journal's inverses
+kin render --project demo --frames 0-59 -o demo/frames   # sequence + hash manifest
 ```
 
 Every verb prints JSON. Errors carry `code`, `message`, `hint`, `fix_op` and `doc`:

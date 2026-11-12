@@ -227,8 +227,9 @@ pub struct Asset {
     pub id: String,
     pub kind: String,
     pub path: String,
+    /// blake3 of the file, so a swapped asset cannot hide behind the same path.
     #[serde(default)]
-    pub sha256: String,
+    pub digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub licence: Option<Licence>,
 }
@@ -652,7 +653,7 @@ mod tests {
             id: "whoosh".into(),
             kind: "sfx".into(),
             path: "assets/whoosh.wav".into(),
-            sha256: "00".into(),
+            digest: "00".into(),
             licence: None,
         };
         let lic = Licence {

@@ -263,6 +263,9 @@ pub struct RenderedLayer {
 pub struct RenderOutput {
     pub width: u32,
     pub height: u32,
+    /// Straight RGBA8 pixels. The strict tier's contract is these bytes, not the PNG
+    /// encoding, so goldens hash this.
+    pub pixels: Vec<u8>,
     pub png: Vec<u8>,
     pub layers: Vec<RenderedLayer>,
     pub skipped: Vec<String>,
@@ -350,10 +353,12 @@ pub fn render_frame(
         });
     }
 
+    let png = canvas.to_png()?;
     Ok(RenderOutput {
         width,
         height,
-        png: canvas.to_png()?,
+        pixels: canvas.data,
+        png,
         layers: drawn,
         skipped: skipped.into_iter().collect(),
     })
@@ -443,6 +448,30 @@ mod tests {
         doc.comps.get_mut("main").unwrap().layers.push(layer);
         let err = render_frame(&doc, "main", 0, 1.0).unwrap_err();
         assert_eq!(err.to_json()["code"], "not-implemented");
+    }
+
+    #[test]
+    fn starter_frame_is_byte_identical() {
+        // The strict tier promises bit-identical pixels across machines and runs. If this
+        // hash moves, the renderer changed: bless it deliberately with
+        // KINEMA_BLESS=1 cargo test -p kinema-raster
+        let doc = Doc::starter();
+        let out = render_frame(&doc, "main", 30, 1.0).unwrap();
+        let hash = blake3::hash(&out.pixels).to_hex().to_string();
+        const EXPECTED: &str = "626b5d1ea356890569c3c7d335365c9a5cf2ef42868c82c5d09a4e3f427b3ca6";
+        if std::env::var("KINEMA_BLESS").is_ok() {
+            panic!("bless: {hash}");
+        }
+        assert_eq!(hash, EXPECTED, "frame 30 pixels changed");
+    }
+
+    #[test]
+    fn the_same_frame_renders_twice_identically() {
+        let doc = Doc::starter();
+        let a = render_frame(&doc, "main", 45, 1.0).unwrap();
+        let b = render_frame(&doc, "main", 45, 1.0).unwrap();
+        assert_eq!(a.pixels, b.pixels);
+        assert_eq!(a.png, b.png);
     }
 
     #[test]

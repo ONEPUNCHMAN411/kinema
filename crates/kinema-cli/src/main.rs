@@ -58,6 +58,8 @@ fn dispatch(argv: &[String]) -> R {
         "check" => cmd_check(argv),
         "credits" => cmd_credits(argv),
         "log" => cmd_log(argv),
+        "undo" => cmd_undo(argv),
+        "asset" | "assets" => cmd_asset(argv),
         other => Err(not_implemented(other)),
     }
 }
@@ -118,11 +120,14 @@ fn capabilities() -> Value {
             {"name": "probe", "summary": "resolved layers at a time", "args": ["--at <seconds>", "--comp <id>", "--layer <id>"]},
             {"name": "eval", "summary": "evaluate one expression against the document", "args": ["<expr>", "--at <seconds>", "--project <dir>"]},
             {"name": "apply", "summary": "apply typed ops, returning their inverses", "args": ["--ops <file|->", "--expect-version <n>", "--dry-run"]},
-            {"name": "render", "summary": "render one frame to PNG", "args": ["--frame <n>", "-o <file.png>", "--scale <f>", "--comp <id>"]},
+            {"name": "render", "summary": "render one frame to PNG, or a sequence with a hash manifest", "args": ["--frame <n>", "--frames all|a-b", "-o <file.png|dir>", "--scale <f>", "--comp <id>"]},
             {"name": "check", "summary": "run craft detectors", "args": ["--comp <id>", "--frame <n>", "--fix", "--max-steps <n>"]},
             {"name": "credits", "summary": "licence roll-up and release gate", "args": []},
+            {"name": "asset add", "summary": "record an asset, its digest and its licence", "args": ["<file>", "--spdx <id>", "--source-url <url>", "--author <name>", "--kind <kind>", "--id <id>"]},
+            {"name": "undo", "summary": "replay the journal's inverses", "args": ["--steps <n>", "--dry-run"]},
             {"name": "log", "summary": "the op journal", "args": []}
         ],
+        "licences": ["cc0-1.0", "cc-by-4.0", "cc-by-sa-4.0", "cc-by-nc-4.0", "cc-by-nd-4.0", "mit", "apache-2.0", "bsd-3-clause", "ofl-1.1", "unknown"],
         "ops": kinema_doc::ops::op_schema(),
         "checks": [
             {"code": "TYPE-FAKE", "severity": "error", "detects": "synthesised italic/bold/small caps, unbundled family", "fix": true},
@@ -483,6 +488,9 @@ fn op_err(e: &serde_json::Error) -> Value {
 }
 
 fn cmd_render(argv: &[String]) -> R {
+    if let Some(spec) = get(argv, "--frames") {
+        return render_sequence(argv, spec);
+    }
     let project = Project::open(argv)?;
     let doc = project.load()?;
     let comp = get(argv, "--comp").unwrap_or("main").to_string();
@@ -542,6 +550,107 @@ fn cmd_render(argv: &[String]) -> R {
         "skipped": rendered.skipped,
         "ms": ms,
     }))
+}
+
+/// A sequence is a directory of PNGs plus a manifest of hashes: the manifest is what an
+/// encoder, a cache and a golden test all read.
+fn render_sequence(argv: &[String], spec: &str) -> R {
+    let project = Project::open(argv)?;
+    let doc = project.load()?;
+    let comp = get(argv, "--comp").unwrap_or("main").to_string();
+    let scale: f64 = get(argv, "--scale")
+        .map(|s| s.parse())
+        .transpose()
+        .map_err(|_| usage("--scale expects a number, e.g. --scale 0.5"))?
+        .unwrap_or(1.0);
+    let total = doc.frame_count(&comp).map_err(|e| doc_err(&e))?;
+    let (start, end): (u32, u32) = if spec == "all" {
+        (0, total.saturating_sub(1))
+    } else {
+        let (a, b) = spec
+            .split_once('-')
+            .ok_or_else(|| usage("--frames is `all` or `first-last`, e.g. --frames 0-59"))?;
+        (
+            a.trim()
+                .parse()
+                .map_err(|_| usage("--frames start must be an integer"))?,
+            b.trim()
+                .parse()
+                .map_err(|_| usage("--frames end must be an integer"))?,
+        )
+    };
+    if start > end {
+        return Err(usage("the frame range is backwards"));
+    }
+    if end >= total {
+        return Err(json!({
+            "ok": false,
+            "error": {
+                "code": "out-of-range",
+                "message": format!("frame {end} is past the last frame ({})", total.saturating_sub(1)),
+                "hint": format!("`{comp}` has {total} frames; use --frames all or a smaller end"),
+                "fix_op": null,
+                "doc": "docs/PLAN.md#contract",
+            }
+        }));
+    }
+    let dir = PathBuf::from(
+        get(argv, "-o")
+            .or_else(|| get(argv, "--out"))
+            .unwrap_or("frames"),
+    );
+    fs::create_dir_all(&dir).map_err(|e| io_err(&dir, &e))?;
+    let size = {
+        let c = doc.comp(&comp).map_err(|e| doc_err(&e))?;
+        [
+            ((c.size[0] as f64) * scale).round().max(1.0) as u32,
+            ((c.size[1] as f64) * scale).round().max(1.0) as u32,
+        ]
+    };
+
+    let started = Instant::now();
+    let mut frames = Vec::new();
+    for frame in start..=end {
+        let out = raster::render_frame(&doc, &comp, frame, scale)
+            .map_err(|e| json!({ "ok": false, "error": e.to_json() }))?;
+        let file = format!("frame_{frame:05}.png");
+        fs::write(dir.join(&file), &out.png).map_err(|e| io_err(&dir.join(&file), &e))?;
+        frames.push(json!({
+            "frame": frame,
+            "file": file,
+            "bytes": out.png.len(),
+            "sha256": deps::hash_bytes(&out.png),
+            "pixels": deps::hash_bytes(&out.pixels),
+            "frame_hash": deps::hash_frame(&doc, &comp, frame, "strict"),
+        }));
+    }
+    let ms = started.elapsed().as_millis();
+    let manifest = json!({
+        "schema": "kinema/sequence/1",
+        "engine": VERSION,
+        "tier": "strict",
+        "comp": comp,
+        "fps": [doc.fps.0.num, doc.fps.0.den],
+        "size": size,
+        "doc_hash": deps::hash_doc(&doc),
+        "count": frames.len(),
+        "first": start,
+        "last": end,
+        "total_ms": ms,
+        "frames": frames,
+    });
+    let manifest_path = dir.join("manifest.json");
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap_or_default(),
+    )
+    .map_err(|e| io_err(&manifest_path, &e))?;
+
+    let mut summary = manifest.clone();
+    summary["frames"] = json!({ "count": manifest["count"] });
+    summary["ok"] = json!(true);
+    summary["manifest"] = json!(manifest_path.display().to_string());
+    Ok(summary)
 }
 
 fn cmd_check(argv: &[String]) -> R {
@@ -647,6 +756,227 @@ fn cmd_credits(argv: &[String]) -> R {
         "release_ok": release_ok,
         "note": "a release render refuses unknown licences and missing credits",
     }))
+}
+
+fn cmd_undo(argv: &[String]) -> R {
+    let project = Project::open(argv)?;
+    let mut doc = project.load()?;
+    let steps: usize = get(argv, "--steps")
+        .map(|s| s.parse())
+        .transpose()
+        .map_err(|_| usage("--steps expects an integer"))?
+        .unwrap_or(1);
+    let path = project.journal_path();
+    let src = fs::read_to_string(&path).unwrap_or_default();
+    let entries: Vec<Value> = src
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let inverses: Vec<Value> = entries
+        .iter()
+        .rev()
+        .filter_map(|e| e.get("inverse").cloned())
+        .filter(|v| !v.is_null())
+        .collect();
+    if inverses.is_empty() {
+        return Err(json!({
+            "ok": false,
+            "error": {
+                "code": "nothing-to-undo",
+                "message": "the journal holds no inverses",
+                "hint": "only applied ops are invertible; `new` and journal-less edits are not",
+                "fix_op": null,
+                "doc": "docs/PLAN.md#contract",
+            }
+        }));
+    }
+    let mut undone = Vec::new();
+    for inv in inverses.iter().take(steps.min(inverses.len())) {
+        let op: Op = serde_json::from_value(inv.clone()).map_err(|e| op_err(&e))?;
+        let before = deps::hash_doc(&doc);
+        let res = doc.apply(&op).map_err(|e| doc_err(&e))?;
+        undone.push(json!({
+            "op": op,
+            "version": res.version,
+            "inverse": res.inverse,
+        }));
+        if !has(argv, "--dry-run") {
+            project.append_journal(&json!({
+                "seq": doc.version,
+                "at": now(),
+                "actor": actor(),
+                "op": op,
+                "reason": "undo",
+                "inverse": res.inverse,
+                "doc_before": before,
+                "doc_after": deps::hash_doc(&doc),
+            }))?;
+        }
+    }
+    if !has(argv, "--dry-run") {
+        project.save(&doc)?;
+    }
+    Ok(json!({
+        "ok": true,
+        "dry_run": has(argv, "--dry-run"),
+        "undone": undone,
+        "version": doc.version,
+        "doc_hash": deps::hash_doc(&doc),
+    }))
+}
+
+/// Licences are looked up, never guessed. An unrecognised SPDX string is a refusal, not
+/// a licence with everything set to false.
+fn licence_flags(spdx: &str) -> Option<(bool, bool, bool, bool)> {
+    let key = spdx.trim().to_ascii_lowercase();
+    let flags = match key.as_str() {
+        "cc0-1.0" | "cc0" => (false, true, true, false),
+        "cc-by-4.0" | "cc-by-3.0" => (true, true, true, false),
+        "cc-by-sa-4.0" | "cc-by-sa-3.0" => (true, true, true, true),
+        "cc-by-nc-4.0" | "cc-by-nc-3.0" => (true, false, true, false),
+        "cc-by-nd-4.0" => (true, true, false, false),
+        "mit" | "apache-2.0" | "bsd-3-clause" => (true, true, true, false),
+        "ofl-1.1" | "ofl-1.0" => (true, true, true, false),
+        "unknown" => (false, false, false, false),
+        _ => return None,
+    };
+    Some(flags)
+}
+
+fn kind_from_path(path: &Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "webp" | "tif" | "tiff" | "exr" => "image",
+        "wav" | "mp3" | "flac" | "ogg" | "aif" | "aiff" => "audio",
+        "mp4" | "mov" | "mkv" | "webm" => "video",
+        "ttf" | "otf" | "woff" | "woff2" => "font",
+        "glb" | "gltf" | "obj" | "fbx" => "model",
+        "hdr" | "hdri" => "hdri",
+        _ => "image",
+    }
+}
+
+fn cmd_asset(argv: &[String]) -> R {
+    let pos = positionals(argv);
+    let sub = pos.get(1).map(String::as_str).unwrap_or("");
+    if sub != "add" {
+        return Err(not_implemented("assets"));
+    }
+    let Some(file) = pos.get(2) else {
+        return Err(usage(
+            "kin asset add <file> --spdx CC0-1.0 --source-url <url> --author <name>",
+        ));
+    };
+    let project = Project::open(argv)?;
+    let mut doc = project.load()?;
+    let path = PathBuf::from(file);
+    let bytes = fs::read(&path).map_err(|e| io_err(&path, &e))?;
+    let spdx = get(argv, "--spdx").unwrap_or("unknown").to_string();
+    let Some((attribution, commercial, derivatives, share_alike)) = licence_flags(&spdx) else {
+        return Err(json!({
+            "ok": false,
+            "error": {
+                "code": "unknown-licence",
+                "message": format!("`{spdx}` is not a licence this build can describe"),
+                "hint": "licences are looked up, not guessed: use cc0-1.0, cc-by-4.0, cc-by-sa-4.0, cc-by-nc-4.0, cc-by-nd-4.0, mit, apache-2.0, bsd-3-clause, ofl-1.1, or `unknown`",
+                "fix_op": null,
+                "doc": "docs/PLAN.md#assets",
+                "offered": spdx,
+            }
+        }));
+    };
+    let source_url = get(argv, "--source-url").unwrap_or("").to_string();
+    if attribution && source_url.is_empty() {
+        return Err(json!({
+            "ok": false,
+            "error": {
+                "code": "credit-incomplete",
+                "message": format!("`{spdx}` requires attribution, so a source URL is required"),
+                "hint": "pass --source-url; the credit line is emitted by `kin credits`",
+                "fix_op": null,
+                "doc": "docs/PLAN.md#assets",
+            }
+        }));
+    }
+    let id = get(argv, "--id").map(str::to_string).unwrap_or_else(|| {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("asset")
+            .to_string()
+    });
+    let asset = kinema_doc::Asset {
+        id: id.clone(),
+        kind: get(argv, "--kind")
+            .unwrap_or(kind_from_path(&path))
+            .to_string(),
+        path: file.to_string(),
+        digest: deps::hash_bytes(&bytes),
+        licence: Some(kinema_doc::Licence {
+            spdx: spdx.clone(),
+            source_url,
+            author: get(argv, "--author").unwrap_or("").to_string(),
+            retrieved_at: get(argv, "--retrieved")
+                .map(str::to_string)
+                .unwrap_or_else(today),
+            attribution_required: attribution,
+            commercial_ok: commercial,
+            derivatives_ok: derivatives,
+            share_alike,
+            model_release: has(argv, "--model-release"),
+        }),
+    };
+    let op = Op::SetAsset {
+        asset: asset.clone(),
+        reason: "record an asset and its licence".into(),
+    };
+    let res = doc.apply(&op).map_err(|e| doc_err(&e))?;
+    project.append_journal(&json!({
+        "seq": doc.version,
+        "at": now(),
+        "actor": actor(),
+        "op": op,
+        "reason": "record an asset and its licence",
+        "inverse": res.inverse,
+        "doc_after": deps::hash_doc(&doc),
+    }))?;
+    project.save(&doc)?;
+    let credit = asset.licence.as_ref().and_then(|l| l.credit_line(&asset));
+    Ok(json!({
+        "ok": true,
+        "asset": {
+            "id": id,
+            "kind": asset.kind,
+            "bytes": bytes.len(),
+            "digest": asset.digest,
+            "licence": asset.licence,
+            "credit": credit,
+        },
+        "version": doc.version,
+    }))
+}
+
+/// `YYYY-MM-DD` in UTC, from the system clock. Used for retrieval dates only; it never
+/// enters a hash.
+fn today() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let z = secs.div_euclid(86_400) + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 fn cmd_log(argv: &[String]) -> R {
@@ -755,6 +1085,43 @@ mod tests {
         assert_eq!(get(&argv, "--project"), Some("./demo"));
         assert!(has(&argv, "--project"));
         assert_eq!(positionals(&argv), vec!["render".to_string()]);
+    }
+
+    #[test]
+    fn licences_are_looked_up_not_guessed() {
+        assert_eq!(licence_flags("cc0-1.0"), Some((false, true, true, false)));
+        assert_eq!(licence_flags("CC-BY-4.0"), Some((true, true, true, false)));
+        assert_eq!(
+            licence_flags("cc-by-sa-4.0"),
+            Some((true, true, true, true))
+        );
+        assert_eq!(
+            licence_flags("cc-by-nc-4.0"),
+            Some((true, false, true, false))
+        );
+        assert_eq!(licence_flags("unknown"), Some((false, false, false, false)));
+        assert_eq!(
+            licence_flags("wtfpl"),
+            None,
+            "an unrecognised licence must refuse"
+        );
+    }
+
+    #[test]
+    fn today_is_an_iso_date() {
+        let d = today();
+        assert_eq!(d.len(), 10, "{d}");
+        assert_eq!(&d[4..5], "-");
+        assert_eq!(&d[7..8], "-");
+        let y: i32 = d[..4].parse().unwrap();
+        assert!((2024..=9999).contains(&y), "{d}");
+    }
+
+    #[test]
+    fn kinds_come_from_extensions() {
+        assert_eq!(kind_from_path(Path::new("a/b.WAV")), "audio");
+        assert_eq!(kind_from_path(Path::new("x.glb")), "model");
+        assert_eq!(kind_from_path(Path::new("noextension")), "image");
     }
 
     #[test]

@@ -46,6 +46,11 @@ pub enum Op {
         #[serde(default)]
         reason: String,
     },
+    RemoveAsset {
+        asset: String,
+        #[serde(default)]
+        reason: String,
+    },
 }
 
 impl Op {
@@ -55,7 +60,8 @@ impl Op {
             | Op::InsertLayer { reason, .. }
             | Op::DeleteLayer { reason, .. }
             | Op::SetComp { reason, .. }
-            | Op::SetAsset { reason, .. } => reason,
+            | Op::SetAsset { reason, .. }
+            | Op::RemoveAsset { reason, .. } => reason,
         }
     }
 
@@ -66,6 +72,7 @@ impl Op {
             Op::DeleteLayer { .. } => "delete-layer",
             Op::SetComp { .. } => "set-comp",
             Op::SetAsset { .. } => "set-asset",
+            Op::RemoveAsset { .. } => "remove-asset",
         }
     }
 }
@@ -202,6 +209,17 @@ fn inverse_of(before: &Doc, op: &Op) -> Result<Option<Op>, DocError> {
                 asset: old.clone(),
                 reason: format!("undo of: {reason}"),
             })),
+            // A brand new asset is undone by removing it, not by restoring nothing.
+            None => Ok(Some(Op::RemoveAsset {
+                asset: asset.id.clone(),
+                reason: format!("undo of: {reason}"),
+            })),
+        },
+        Op::RemoveAsset { asset, reason } => match before.assets.get(asset) {
+            Some(old) => Ok(Some(Op::SetAsset {
+                asset: old.clone(),
+                reason: format!("undo of: {reason}"),
+            })),
             None => Ok(None),
         },
     }
@@ -278,6 +296,14 @@ impl Doc {
             Op::SetAsset { asset, .. } => {
                 self.assets.insert(asset.id.clone(), asset.clone());
             }
+            Op::RemoveAsset { asset, .. } => {
+                if self.assets.remove(asset).is_none() {
+                    return Err(DocError::NotFound {
+                        path: format!("asset:{asset}"),
+                        hint: "run `kin credits` to list asset ids".to_string(),
+                    });
+                }
+            }
         }
         self.version += 1;
         Ok(AppliedResult {
@@ -311,7 +337,9 @@ pub fn op_schema() -> Value {
             {"type": "object", "required": ["op", "comp"],
              "properties": {"op": {"const": "set-comp"}, "comp": {"type": "string"}, "size": {"type": "array", "items": {"type": "integer"}}, "duration": {"type": "number"}, "reason": {"type": "string"}}},
             {"type": "object", "required": ["op", "asset"],
-             "properties": {"op": {"const": "set-asset"}, "asset": {"type": "object"}, "reason": {"type": "string"}}}
+             "properties": {"op": {"const": "set-asset"}, "asset": {"type": "object"}, "reason": {"type": "string"}}},
+            {"type": "object", "required": ["op", "asset"],
+             "properties": {"op": {"const": "remove-asset"}, "asset": {"type": "string"}, "reason": {"type": "string"}}}
         ]
     })
 }
@@ -417,6 +445,33 @@ mod tests {
         let op = set("nope.nope", json!(1));
         let err = doc.apply(&op).unwrap_err();
         assert_eq!(err.to_json()["code"], "not-found");
+    }
+
+    #[test]
+    fn assets_round_trip_through_the_journal() {
+        let mut doc = Doc::starter();
+        let op: Op = serde_json::from_value(json!({
+            "op": "set-asset",
+            "asset": {"id": "logo", "kind": "image", "path": "assets/logo.png", "digest": "ab"},
+            "reason": "test"
+        }))
+        .unwrap();
+        let res = doc.apply(&op).unwrap();
+        assert!(doc.assets.contains_key("logo"));
+        let inverse = res.inverse.expect("a new asset is undone by removing it");
+        assert_eq!(inverse.name(), "remove-asset");
+        doc.apply(&inverse).unwrap();
+        assert!(doc.assets.is_empty());
+    }
+
+    #[test]
+    fn removing_a_missing_asset_is_not_found() {
+        let mut doc = Doc::starter();
+        let op: Op = serde_json::from_value(json!({
+            "op": "remove-asset", "asset": "nope", "reason": "test"
+        }))
+        .unwrap();
+        assert_eq!(doc.apply(&op).unwrap_err().to_json()["code"], "not-found");
     }
 
     #[test]

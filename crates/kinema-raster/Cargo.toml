@@ -9,3 +9,6 @@ repository.workspace = true
 kinema-doc.workspace = true
 serde_json.workspace = true
 png.workspace = true
+
+[dev-dependencies]
+blake3.workspace = true

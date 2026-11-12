@@ -114,7 +114,7 @@ pub fn doc_schema() -> Value {
                     "id": {"type": "string"},
                     "kind": {"enum": ["image", "video", "audio", "font", "model", "hdri"]},
                     "path": {"type": "string"},
-                    "sha256": {"type": "string"},
+                    "digest": {"type": "string", "description": "blake3 of the file"},
                     "licence": {"$ref": "#/$defs/licence"}
                 }
             },
