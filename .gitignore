@@ -1,0 +1,11 @@
+/target
+**/target
+*.rs.bk
+.kinema/cache/
+.kinema/*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+*.pdb

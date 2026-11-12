@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --all
+      - name: Vertical slice
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build
+          KIN=target/debug/kin
+          "$KIN" new target/slice
+          "$KIN" render --project target/slice --frame 0 -o target/slice/f0.png
+          "$KIN" probe --project target/slice --at 1.0 > /dev/null
+          "$KIN" check --project target/slice
+          test -s target/slice/f0.png

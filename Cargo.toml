@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kinema-time",
+    "crates/kinema-doc",
+    "crates/kinema-deps",
+    "crates/kinema-raster",
+    "crates/kinema-checks",
+    "crates/kinema-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ONEPUNCHMAN411/kinema"
+rust-version = "1.80"
+
+[workspace.dependencies]
+kinema-time = { path = "crates/kinema-time" }
+kinema-doc = { path = "crates/kinema-doc" }
+kinema-deps = { path = "crates/kinema-deps" }
+kinema-raster = { path = "crates/kinema-raster" }
+kinema-checks = { path = "crates/kinema-checks" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1"
+png = "0.17"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
