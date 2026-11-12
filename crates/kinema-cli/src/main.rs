@@ -170,9 +170,11 @@ fn capabilities() -> Value {
             {"code": "STAGGER", "severity": "warn", "detects": "more than 70% of layers entering on one frame", "fix": true},
             {"code": "TYPE-SCALE", "severity": "warn", "detects": "a size off the modular scale, or more than four sizes", "fix": true},
             {"code": "LOOK-DRIFT", "severity": "warn", "detects": "a chromatic colour more than 25 degrees from the look's accent hue", "fix": true},
-            {"code": "BANDING", "severity": "warn", "detects": "a ramp holding one colour for more than 16 px with dither off", "fix": true}
+            {"code": "BANDING", "severity": "warn", "detects": "a ramp holding one colour for more than 16 px with dither off", "fix": true},
+            {"code": "MATTE-COVER", "severity": "warn", "detects": "a matte that never overlaps the layer it cuts", "fix": false},
+            {"code": "EMPTY-COMP", "severity": "warn", "detects": "a comp layer whose nested comp has nothing live while it shows", "fix": false}
         ],
-        "checks_advisory": {"HOLD-NONE": "the remedy is which beat to hold; the hint names it, the engine will not pick"},
+        "checks_advisory": {"HOLD-NONE": "the remedy is which beat to hold; the hint names it, the engine will not pick", "MATTE-COVER": "moving a matte is a directing call; the hint names both boxes", "EMPTY-COMP": "which beat the nested comp should fill is a directing call"},
         "checks_pending": ["CUT-TIMING", "JUMPCUT", "LOUD"],
         "text_anim": {
             "types": ["reveal", "rise"],

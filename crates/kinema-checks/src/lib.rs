@@ -67,8 +67,135 @@ pub fn run(doc: &Doc, comp: &str, frame: Option<u32>) -> Vec<Defect> {
     hold_none(doc, comp, &mut out);
     shutter(doc, comp, &mut out);
     stagger(doc, comp, frame, &mut out, frame_of);
+    matte_cover(doc, comp, &mut out);
+    empty_comp(doc, comp, &mut out);
     let _ = c;
     out
+}
+
+fn overlap(a: [f64; 4], b: [f64; 4]) -> f64 {
+    let w = (a[0] + a[2]).min(b[0] + b[2]) - a[0].max(b[0]);
+    let h = (a[1] + a[3]).min(b[1] + b[3]) - a[1].max(b[1]);
+    if w <= 0.0 || h <= 0.0 {
+        0.0
+    } else {
+        w * h
+    }
+}
+
+/// A layer cut by a matte that never touches it is a layer you cannot see, and nothing in
+/// the render says so. This is advisory: where the matte should sit is a directing call.
+fn matte_cover(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
+    let Ok(c) = doc.comp(comp) else { return };
+    for layer in &c.layers {
+        let Some(m) = &layer.mattes else { continue };
+        let Some(source_id) = m.alpha.as_ref().or(m.luma.as_ref()) else {
+            continue;
+        };
+        let Some(src) = c.layers.iter().find(|l| &l.id == source_id) else {
+            continue;
+        };
+        let start = layer.start.max(src.start);
+        let end = (layer.start + layer.duration).min(src.start + src.duration);
+        if end <= start {
+            continue;
+        }
+        let mut best = 0.0f64;
+        let mut checked = Vec::new();
+        let mut boxes = Vec::new();
+        for i in 0..5 {
+            let t = start + (i as f64 + 0.5) / 5.0 * (end - start);
+            let (Ok(a), Ok(b)) = (doc.eval_layer(comp, layer, t), doc.eval_layer(comp, src, t))
+            else {
+                continue;
+            };
+            let area = overlap(a.bbox, b.bbox);
+            best = best.max(area);
+            checked.push(kinema_time::timecode(
+                kinema_time::seconds_to_ticks(t),
+                doc.fps,
+            ));
+            boxes.push(json!({"layer": a.bbox, "matte": b.bbox}));
+        }
+        if best > 0.0 {
+            continue;
+        }
+        out.push(Defect {
+            code: "MATTE-COVER",
+            severity: "warn",
+            comp: comp.to_string(),
+            layer: Some(layer.id.clone()),
+            frame: None,
+            evidence: json!({
+                "source": source_id,
+                "overlap_area": best,
+                "checked": checked,
+                "bboxes": boxes,
+                "reason": "a matte that never reaches the layer hides it",
+            }),
+            hint: format!(
+                "`{}` is cut by `{source_id}` and the two never overlap; move the matte or drop it",
+                layer.id
+            ),
+            fix_op: None,
+        });
+    }
+}
+
+/// A nested comp with nothing visible in the window its layer covers renders as nothing.
+fn empty_comp(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
+    let Ok(c) = doc.comp(comp) else { return };
+    for layer in &c.layers {
+        if layer.kind != LayerKind::Comp {
+            continue;
+        }
+        let Some(source) = &layer.source else {
+            continue;
+        };
+        let Some(nested) = doc.comps.get(source) else {
+            continue;
+        };
+        let start = layer.start.max(0.0);
+        let end = layer.start + layer.duration;
+        if end <= start {
+            continue;
+        }
+        let mut live_layers = 0;
+        for i in 0..5 {
+            let t = layer.start + (i as f64 + 0.5) / 5.0 * layer.duration;
+            let inner = t - layer.start;
+            if inner >= nested.duration {
+                continue;
+            }
+            let live = nested
+                .layers
+                .iter()
+                .filter(|l| inner >= l.start && inner < l.start + l.duration)
+                .count();
+            live_layers = live_layers.max(live);
+        }
+        if live_layers > 0 {
+            continue;
+        }
+        out.push(Defect {
+            code: "EMPTY-COMP",
+            severity: "warn",
+            comp: comp.to_string(),
+            layer: Some(layer.id.clone()),
+            frame: None,
+            evidence: json!({
+                "source": source,
+                "nested_layers": nested.layers.len(),
+                "nested_duration": nested.duration,
+                "layer_duration": layer.duration,
+            }),
+            hint: format!(
+                "layer `{}` draws comp `{source}`, which has nothing live while it shows",
+                layer.id
+            ),
+            fix_op: None,
+        });
+    }
 }
 
 /// Properties a detector can reason about, with the path segment that addresses them.
@@ -862,6 +989,65 @@ mod tests {
             "starter should be clean, got {:?}",
             found.iter().map(|d| d.code).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn a_matte_that_never_reaches_its_layer_is_reported() {
+        let mut doc = Doc::starter();
+        let ops: Vec<kinema_doc::Op> = serde_json::from_value(json!([
+            {"op": "set-mattes", "comp": "main", "layer": "title",
+             "mattes": {"alpha": "accent"}, "reason": "test"},
+            {"op": "set-prop", "path": "comp:main/layer:accent/transform.position",
+             "value": [120.0, 120.0], "reason": "test"}
+        ]))
+        .unwrap();
+        for op in &ops {
+            doc.apply(op).unwrap();
+        }
+        let codes: Vec<_> = defects(&doc).iter().map(|d| d.code).collect();
+        assert!(codes.contains(&"MATTE-COVER"), "{codes:?}");
+    }
+
+    #[test]
+    fn a_matte_that_does_overlap_is_left_alone() {
+        let mut doc = Doc::starter();
+        let op: kinema_doc::Op = serde_json::from_value(json!({
+            "op": "set-mattes", "comp": "main", "layer": "title",
+            "mattes": {"alpha": "accent"}, "reason": "test"
+        }))
+        .unwrap();
+        doc.apply(&op).unwrap();
+        let codes: Vec<_> = defects(&doc).iter().map(|d| d.code).collect();
+        assert!(!codes.contains(&"MATTE-COVER"), "{codes:?}");
+    }
+
+    #[test]
+    fn a_nested_comp_with_nothing_in_it_is_reported() {
+        let mut doc = Doc::starter();
+        doc.comps.insert(
+            "empty".into(),
+            kinema_doc::Comp {
+                size: [320, 180],
+                duration: 4.0,
+                shutter: 0.0,
+                samples: 8,
+                layers: vec![],
+            },
+        );
+        let layer: kinema_doc::Layer = serde_json::from_value(json!({
+            "id": "nested", "kind": "comp", "start": 0.0, "duration": 4.0,
+            "source": "empty"
+        }))
+        .unwrap();
+        doc.apply(&kinema_doc::Op::InsertLayer {
+            comp: "main".into(),
+            index: None,
+            layer: Box::new(layer),
+            reason: "test".into(),
+        })
+        .unwrap();
+        let codes: Vec<_> = defects(&doc).iter().map(|d| d.code).collect();
+        assert!(codes.contains(&"EMPTY-COMP"), "{codes:?}");
     }
 
     #[test]

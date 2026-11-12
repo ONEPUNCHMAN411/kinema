@@ -127,7 +127,10 @@ the delete-layer that breaks it, not a stack overflow. Nested comps render witho
 parent's motion blur, because shutter belongs to the comp being rendered.
 
 Detectors live in this build: `TYPE-FAKE`, `TYPE-SCALE`, `LOOK-DRIFT`, `BANDING`, `READ`,
-`CHROMA`, `PALETTE`, `EASE-FLAT`, `SHUTTER`, `HOLD-NONE` and `STAGGER`. All but `HOLD-NONE` ship a `fix_op`, and `kin check --fix`
+`CHROMA`, `PALETTE`, `EASE-FLAT`, `SHUTTER`, `HOLD-NONE`, `STAGGER`, plus `MATTE-COVER` and
+`EMPTY-COMP`, which catch the two ways a composed frame silently comes out empty: a matte
+that never reaches the layer it cuts, and a comp layer whose nested comp has nothing live
+while it shows. Both are advisory, because moving a matte or filling a comp is directing. All but `HOLD-NONE` ship a `fix_op`, and `kin check --fix`
 applies them to a fixpoint: remedies are measured against one snapshot, so CHROMA's
 remedy and READ's can disagree, and only re-measuring after each step settles it. The
 remaining detectors are specified with their thresholds in `docs/PLAN.md` and land with
