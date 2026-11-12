@@ -59,6 +59,7 @@ fn dispatch(argv: &[String]) -> R {
         "credits" => cmd_credits(argv),
         "log" => cmd_log(argv),
         "undo" => cmd_undo(argv),
+        "verify" => cmd_verify(argv),
         "asset" | "assets" => cmd_asset(argv),
         other => Err(not_implemented(other)),
     }
@@ -125,6 +126,7 @@ fn capabilities() -> Value {
             {"name": "credits", "summary": "licence roll-up and release gate", "args": []},
             {"name": "asset add", "summary": "record an asset, its digest and its licence", "args": ["<file>", "--spdx <id>", "--source-url <url>", "--author <name>", "--kind <kind>", "--id <id>"]},
             {"name": "undo", "summary": "replay the journal's inverses", "args": ["--steps <n>", "--dry-run"]},
+            {"name": "verify", "summary": "check a sequence manifest against disk, and with --render against a fresh render", "args": ["--manifest <file>", "--render"]},
             {"name": "log", "summary": "the op journal", "args": []}
         ],
         "licences": ["cc0-1.0", "cc-by-4.0", "cc-by-sa-4.0", "cc-by-nc-4.0", "cc-by-nd-4.0", "mit", "apache-2.0", "bsd-3-clause", "ofl-1.1", "unknown"],
@@ -687,6 +689,7 @@ fn render_sequence(argv: &[String], spec: &str) -> R {
         "first": start,
         "last": end,
         "variant": variant,
+        "scale": scale,
         "rendered": rendered,
         "reused": reused,
         "total_ms": ms,
@@ -704,6 +707,96 @@ fn render_sequence(argv: &[String], spec: &str) -> R {
     summary["ok"] = json!(true);
     summary["manifest"] = json!(manifest_path.display().to_string());
     Ok(summary)
+}
+
+/// Check a sequence manifest against the files on disk, and with `--render`, against a
+/// fresh render. The second is the reproducibility claim: same document, same pixels.
+fn cmd_verify(argv: &[String]) -> R {
+    let manifest_path =
+        get(argv, "--manifest").ok_or_else(|| usage("pass --manifest <dir>/manifest.json"))?;
+    let project = Project::open(argv)?;
+    let doc = project.load()?;
+    let src =
+        fs::read_to_string(manifest_path).map_err(|e| io_err(Path::new(manifest_path), &e))?;
+    let manifest: Value = serde_json::from_str(&src).map_err(|e| {
+        json!({
+            "ok": false,
+            "error": {
+                "code": "invalid-json",
+                "message": e.to_string(),
+                "hint": "--manifest takes a manifest.json written by `kin render --frames`",
+                "fix_op": null,
+                "doc": "docs/PLAN.md#contract",
+            }
+        })
+    })?;
+    let comp = manifest["comp"].as_str().unwrap_or("main").to_string();
+    let scale = manifest["scale"]
+        .as_f64()
+        .or_else(|| {
+            manifest["variant"]
+                .as_str()
+                .and_then(|v| v.split('@').nth(1))
+                .and_then(|s| s.parse::<f64>().ok())
+        })
+        .unwrap_or(1.0);
+    let entries = manifest["frames"].as_array().cloned().unwrap_or_default();
+    if entries.is_empty() {
+        return Err(usage("the manifest lists no frames"));
+    }
+    let re_render = has(argv, "--render");
+    let doc_hash = deps::hash_doc(&doc);
+    let doc_changed = manifest["doc_hash"].as_str() != Some(doc_hash.as_str());
+    let dir = Path::new(manifest_path).parent().unwrap_or(Path::new("."));
+
+    let mut checked = 0usize;
+    let mut mismatched = Vec::new();
+    let mut missing = Vec::new();
+    for entry in &entries {
+        let frame = entry["frame"].as_u64().unwrap_or(0) as u32;
+        let file = entry["file"].as_str().unwrap_or_default();
+        let path = dir.join(file);
+        if file.is_empty() || !path.exists() {
+            missing.push(json!({ "frame": frame, "file": file }));
+            continue;
+        }
+        let bytes = fs::read(&path).map_err(|e| io_err(&path, &e))?;
+        if deps::hash_bytes(&bytes) != entry["sha256"].as_str().unwrap_or_default() {
+            mismatched.push(json!({ "frame": frame, "reason": "file", "file": file }));
+            continue;
+        }
+        if re_render {
+            let out = raster::render_frame(&doc, &comp, frame, scale)
+                .map_err(|e| json!({ "ok": false, "error": e.to_json() }))?;
+            let actual = deps::hash_bytes(&out.pixels);
+            if actual != entry["pixels"].as_str().unwrap_or_default() {
+                mismatched.push(json!({
+                    "frame": frame,
+                    "reason": "render",
+                    "expected": entry["pixels"],
+                    "actual": actual,
+                }));
+                continue;
+            }
+        }
+        checked += 1;
+    }
+    let ok = mismatched.is_empty() && missing.is_empty();
+    Ok(json!({
+        "ok": ok,
+        "manifest": manifest_path,
+        "comp": comp,
+        "checked": checked,
+        "mismatched": mismatched,
+        "missing": missing,
+        "re_rendered": re_render,
+        "doc_changed": doc_changed,
+        "note": if doc_changed && re_render {
+            json!("the document has changed since this sequence was rendered, so render mismatches are expected")
+        } else {
+            Value::Null
+        },
+    }))
 }
 
 fn cmd_check(argv: &[String]) -> R {
@@ -1138,6 +1231,74 @@ mod tests {
         assert_eq!(get(&argv, "--project"), Some("./demo"));
         assert!(has(&argv, "--project"));
         assert_eq!(positionals(&argv), vec!["render".to_string()]);
+    }
+
+    fn call(args: &[&str]) -> Result<Value, Value> {
+        let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        dispatch(&argv)
+    }
+
+    fn scratch(name: &str) -> String {
+        let mut p = std::env::temp_dir();
+        p.push(format!("kinema-cli-{name}-{}", std::process::id()));
+        p.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn a_project_renders_a_sequence_and_verifies_it() {
+        let root = scratch("slice");
+        let frames = format!("{root}/frames");
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(call(&["new", &root]).unwrap()["ok"], json!(true));
+
+        let out = call(&[
+            "render",
+            "--project",
+            &root,
+            "--frames",
+            "0-1",
+            "-o",
+            &frames,
+            "--scale",
+            "0.25",
+        ])
+        .unwrap();
+        assert_eq!(out["count"], json!(2));
+        assert_eq!(out["rendered"], json!(2));
+
+        let manifest = format!("{frames}/manifest.json");
+        let verify = call(&["verify", "--project", &root, "--manifest", &manifest]).unwrap();
+        assert_eq!(verify["ok"], json!(true), "{verify}");
+        assert_eq!(verify["checked"], json!(2));
+
+        // Nothing changed, so the second pass draws nothing.
+        let again = call(&[
+            "render",
+            "--project",
+            &root,
+            "--frames",
+            "0-1",
+            "-o",
+            &frames,
+            "--scale",
+            "0.25",
+        ])
+        .unwrap();
+        assert_eq!(again["reused"], json!(2));
+        assert_eq!(again["rendered"], json!(0));
+
+        // Re-rendering from the document must reproduce the recorded pixels.
+        let fresh = call(&[
+            "verify",
+            "--project",
+            &root,
+            "--manifest",
+            &manifest,
+            "--render",
+        ])
+        .unwrap();
+        assert_eq!(fresh["ok"], json!(true), "{fresh}");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

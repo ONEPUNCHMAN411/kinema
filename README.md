@@ -52,6 +52,11 @@ keyframes, links and expressions. `graph` returns a typed `not-implemented` with
 that names the phase. Text is drawn with a built-in 5 x 7 bitmap face — `Inter` at 400 and 700
 are the only declared faces, and `TYPE-FAKE` says so when a document asks for others.
 
+Re-rendering a sequence only redraws frames whose identity changed: a frame is hashed
+from the layers actually on screen at that instant, so editing an off-screen layer keeps
+its frames. `kin verify --render` re-renders a manifest and compares pixels, which is the
+reproducibility claim stated as a command.
+
 Not built yet: GPU raster, media decode, encode, audio, assets, capture, templates, MCP.
 Each returns a typed `not-implemented` error with a hint rather than pretending.
 
@@ -85,6 +90,7 @@ kin log --project demo           # the op journal
 kin credits --project demo       # licence roll-up and release gate
 kin asset add still.png --project demo --spdx cc-by-4.0 --source-url <url> --author <name>
 kin undo --project demo          # replay the journal's inverses
+kin verify --project demo --manifest demo/frames/manifest.json --render
 kin render --project demo --frames 0-59 -o demo/frames   # sequence + hash manifest
 kin apply --project demo --ops -  <<<'{"op":"set-prop","path":"comp:main/shutter","value":180,"reason":"film default"}'
 kin render --project demo --frames 0-59 -o demo/frames   # only changed frames redraw
