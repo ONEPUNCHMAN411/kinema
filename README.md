@@ -128,7 +128,9 @@ parent's motion blur, because shutter belongs to the comp being rendered.
 
 Detectors live in this build: `TYPE-FAKE`, `TYPE-SCALE`, `LOOK-DRIFT`, `BANDING`, `READ`,
 `CHROMA`, `PALETTE`, `EASE-FLAT`, `SHUTTER`, `HOLD-NONE`, `STAGGER`, plus `MATTE-COVER` and
-`EMPTY-COMP`, which catch the two ways a composed frame silently comes out empty: a matte
+`EMPTY-COMP`, which catch the two ways a composed frame silently comes out empty, plus
+`MODIFIER`, which names a modifier the build cannot draw and ships the `set-modifier`
+that removes just it. Two ways to compose an empty frame: a matte
 that never reaches the layer it cuts, and a comp layer whose nested comp has nothing live
 while it shows. Both are advisory, because moving a matte or filling a comp is directing. All but `HOLD-NONE` ship a `fix_op`, and `kin check --fix`
 applies them to a fixpoint: remedies are measured against one snapshot, so CHROMA's

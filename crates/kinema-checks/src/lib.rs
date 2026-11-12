@@ -69,8 +69,64 @@ pub fn run(doc: &Doc, comp: &str, frame: Option<u32>) -> Vec<Defect> {
     stagger(doc, comp, frame, &mut out, frame_of);
     matte_cover(doc, comp, &mut out);
     empty_comp(doc, comp, &mut out);
+    modifier(doc, comp, &mut out);
     let _ = c;
     out
+}
+
+/// Modifiers the renderer knows. Kept next to the detector rather than the raster so a
+/// check can name the problem before a render has to fail on it.
+const MODIFIERS: [&str; 6] = [
+    "glow",
+    "blur",
+    "drop-shadow",
+    "exposure",
+    "contrast",
+    "saturate",
+];
+
+/// An unknown modifier is caught here, with the fix that removes just it: the renderer
+/// refuses the frame, but a check should say so before a render is spent.
+fn modifier(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
+    let Ok(c) = doc.comp(comp) else { return };
+    for layer in &c.layers {
+        let unknown: Vec<_> = layer
+            .modifiers
+            .iter()
+            .filter(|m| !MODIFIERS.contains(&m.kind.as_str()))
+            .map(|m| m.kind.clone())
+            .collect();
+        if unknown.is_empty() {
+            continue;
+        }
+        let kept: Vec<_> = layer
+            .modifiers
+            .iter()
+            .filter(|m| MODIFIERS.contains(&m.kind.as_str()))
+            .cloned()
+            .collect();
+        out.push(Defect {
+            code: "MODIFIER",
+            severity: "error",
+            comp: comp.to_string(),
+            layer: Some(layer.id.clone()),
+            frame: None,
+            evidence: json!({"unknown": unknown, "known": MODIFIERS}),
+            hint: format!(
+                "layer `{}` asks for {}; this build applies {}",
+                layer.id,
+                unknown.join(", "),
+                MODIFIERS.join(", ")
+            ),
+            fix_op: Some(json!({
+                "op": "set-modifier",
+                "comp": comp,
+                "layer": layer.id,
+                "modifiers": kept,
+                "reason": "drop a modifier this build cannot draw"
+            })),
+        });
+    }
 }
 
 fn overlap(a: [f64; 4], b: [f64; 4]) -> f64 {
@@ -988,6 +1044,34 @@ mod tests {
             found.is_empty(),
             "starter should be clean, got {:?}",
             found.iter().map(|d| d.code).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn an_unknown_modifier_is_caught_before_a_render() {
+        let mut doc = Doc::starter();
+        let layer: kinema_doc::Layer = serde_json::from_value(json!({
+            "id": "bloomed", "kind": "solid", "start": 0.0, "duration": 4.0,
+            "modifiers": [{"type": "bloom"}]
+        }))
+        .unwrap();
+        doc.apply(&kinema_doc::Op::InsertLayer {
+            comp: "main".into(),
+            index: None,
+            layer: Box::new(layer),
+            reason: "test".into(),
+        })
+        .unwrap();
+        let found = defects(&doc);
+        let d = found
+            .iter()
+            .find(|d| d.code == "MODIFIER")
+            .expect("MODIFIER");
+        let fix: kinema_doc::Op = serde_json::from_value(d.fix_op.clone().unwrap()).unwrap();
+        doc.apply(&fix).unwrap();
+        assert!(
+            !defects(&doc).iter().any(|d| d.code == "MODIFIER"),
+            "the fix clears the modifier the build cannot draw"
         );
     }
 
