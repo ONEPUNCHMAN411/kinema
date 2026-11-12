@@ -32,6 +32,24 @@ pub enum Op {
         #[serde(default)]
         reason: String,
     },
+    /// Create a comp, with no layers unless `layers` says otherwise. Its inverse deletes it.
+    CreateComp {
+        comp: String,
+        #[serde(default)]
+        size: Option<[u32; 2]>,
+        #[serde(default)]
+        duration: Option<f64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        layers: Vec<Layer>,
+        #[serde(default)]
+        reason: String,
+    },
+    /// Delete a comp. Its inverse puts it back, layers and all.
+    DeleteComp {
+        comp: String,
+        #[serde(default)]
+        reason: String,
+    },
     SetComp {
         comp: String,
         #[serde(default)]
@@ -87,6 +105,8 @@ impl Op {
             | Op::InsertLayer { reason, .. }
             | Op::DeleteLayer { reason, .. }
             | Op::SetComp { reason, .. }
+            | Op::CreateComp { reason, .. }
+            | Op::DeleteComp { reason, .. }
             | Op::SetAsset { reason, .. }
             | Op::RemoveAsset { reason, .. }
             | Op::SetLook { reason, .. }
@@ -101,6 +121,8 @@ impl Op {
             Op::InsertLayer { .. } => "insert-layer",
             Op::DeleteLayer { .. } => "delete-layer",
             Op::SetComp { .. } => "set-comp",
+            Op::CreateComp { .. } => "create-comp",
+            Op::DeleteComp { .. } => "delete-comp",
             Op::SetAsset { .. } => "set-asset",
             Op::RemoveAsset { .. } => "remove-asset",
             Op::SetLook { .. } => "set-look",
@@ -227,6 +249,20 @@ fn inverse_of(before: &Doc, op: &Op) -> Result<Option<Op>, DocError> {
                 }
                 None => Ok(None),
             }
+        }
+        Op::CreateComp { comp, reason, .. } => Ok(Some(Op::DeleteComp {
+            comp: comp.clone(),
+            reason: format!("undo of: {reason}"),
+        })),
+        Op::DeleteComp { comp, reason } => {
+            let c = before.comp(comp)?;
+            Ok(Some(Op::CreateComp {
+                comp: comp.clone(),
+                size: Some(c.size),
+                duration: Some(c.duration),
+                layers: c.layers.clone(),
+                reason: format!("undo of: {reason}"),
+            }))
         }
         Op::SetComp { comp, reason, .. } => {
             let c = before.comp(comp)?;
@@ -395,6 +431,46 @@ impl Doc {
             Op::SetLook { look, .. } => {
                 self.look = look.clone();
             }
+            Op::CreateComp {
+                comp,
+                size,
+                duration,
+                layers,
+                ..
+            } => {
+                if self.comps.contains_key(comp) {
+                    return Err(DocError::Invalid {
+                        code: "exists",
+                        message: format!("comp `{comp}` is already there"),
+                        hint: "use set-comp to change a comp that exists".to_string(),
+                    });
+                }
+                if comp.trim().is_empty() {
+                    return Err(DocError::Invalid {
+                        code: "bad-id",
+                        message: "a comp needs an id".to_string(),
+                        hint: "a comp layer finds its source by this id".to_string(),
+                    });
+                }
+                self.comps.insert(
+                    comp.clone(),
+                    crate::model::Comp {
+                        size: size.unwrap_or([1920, 1080]),
+                        duration: duration.unwrap_or(5.0),
+                        shutter: 0.0,
+                        samples: 8,
+                        layers: layers.clone(),
+                    },
+                );
+            }
+            Op::DeleteComp { comp, .. } => {
+                if self.comps.remove(comp).is_none() {
+                    return Err(DocError::NotFound {
+                        path: format!("comp:{comp}"),
+                        hint: "check the comp id".to_string(),
+                    });
+                }
+            }
             Op::SetMattes {
                 comp,
                 layer,
@@ -496,7 +572,13 @@ pub fn op_schema() -> Value {
              "examples": [{"op": "set-gradient", "comp": "main", "layer": "bg", "on": "solid", "gradient": {"kind": "linear", "angle": 90, "dither": true, "stops": [{"at": 0, "color": "#0a0e18"}, {"at": 1, "color": "#1b2a4a"}]}, "reason": "a ground with depth"}]},
             {"type": "object", "required": ["op", "comp", "layer"],
              "properties": {"op": {"const": "set-mattes"}, "comp": {"type": "string"}, "layer": {"type": "string"}, "mattes": {"type": ["object", "null"]}, "reason": {"type": "string"}},
-             "examples": [{"op": "set-mattes", "comp": "main", "layer": "title", "mattes": {"alpha": "accent"}, "reason": "cut the title to the rule"}]}
+             "examples": [{"op": "set-mattes", "comp": "main", "layer": "title", "mattes": {"alpha": "accent"}, "reason": "cut the title to the rule"}]},
+            {"type": "object", "required": ["op", "comp"],
+             "properties": {"op": {"const": "create-comp"}, "comp": {"type": "string"}, "size": {"type": "array"}, "duration": {"type": "number"}, "layers": {"type": "array"}, "reason": {"type": "string"}},
+             "examples": [{"op": "create-comp", "comp": "lower-third", "size": [1920, 400], "duration": 4, "reason": "a reusable strap"}]},
+            {"type": "object", "required": ["op", "comp"],
+             "properties": {"op": {"const": "delete-comp"}, "comp": {"type": "string"}, "reason": {"type": "string"}},
+             "examples": [{"op": "delete-comp", "comp": "lower-third", "reason": "the strap is gone from the cut"}]}
         ]
     })
 }
@@ -647,6 +729,36 @@ mod tests {
         assert_eq!(look.scale.base, 14.0);
         doc.apply(&res.inverse.unwrap()).unwrap();
         assert_eq!(doc.look, before, "undo restores the previous look");
+    }
+
+    #[test]
+    fn a_comp_can_be_created_and_deleted_with_the_layers_intact() {
+        let mut doc = Doc::starter();
+        let create: Op = serde_json::from_value(json!({
+            "op": "create-comp", "comp": "strap", "size": [1920, 400], "duration": 4.0,
+            "layers": doc.comps["main"].layers.clone(), "reason": "test"
+        }))
+        .unwrap();
+        let made = doc.apply(&create).unwrap();
+        assert_eq!(doc.comps["strap"].layers.len(), 3);
+        let removed = doc.apply(&made.inverse.clone().unwrap()).unwrap();
+        assert!(!doc.comps.contains_key("strap"), "delete-comp removes it");
+        doc.apply(&removed.inverse.unwrap()).unwrap();
+        assert_eq!(
+            doc.comps["strap"].layers.len(),
+            3,
+            "the inverse of delete-comp restores the layers, not an empty comp"
+        );
+    }
+
+    #[test]
+    fn creating_a_comp_that_exists_is_refused() {
+        let mut doc = Doc::starter();
+        let op: Op = serde_json::from_value(json!({
+            "op": "create-comp", "comp": "main", "reason": "test"
+        }))
+        .unwrap();
+        assert_eq!(doc.apply(&op).unwrap_err().to_json()["code"], "exists");
     }
 
     #[test]

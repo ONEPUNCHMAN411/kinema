@@ -109,8 +109,10 @@ layer disappearing quietly is the failure this feature invites. The same trap bi
 other side: a matte whose source ink does not reach the layer produces an empty region, not
 an error, so `kin probe` both bboxes before wondering where the picture went.
 
-A comp layer (`"kind": "comp"`, `"source": "<comp id>"`) draws another comp in its own
-frame: the layer's start is the nested comp's zero, its position is where the nested frame
+`create-comp` makes a comp (with layers, if you have them) and `delete-comp` takes one
+away; each is the other's inverse, so a deleted comp comes back with its layers rather
+than empty. A comp layer (`"kind": "comp"`, `"source": "<comp id>"`) draws another comp
+in its own frame: the layer's start is the nested comp's zero, its position is where the nested frame
 sits, and its bbox is the nested comp's size. A comp that contains itself is an error with
 the delete-layer that breaks it, not a stack overflow. Nested comps render without the
 parent's motion blur, because shutter belongs to the comp being rendered.
