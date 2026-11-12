@@ -1,0 +1,11 @@
+[package]
+name = "kinema-deps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kinema-doc.workspace = true
+serde_json.workspace = true
+blake3.workspace = true
