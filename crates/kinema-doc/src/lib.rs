@@ -1,5 +1,9 @@
 //! The Kinema document: one typed value that everything else is a projection of.
 
+// The JSON Schema is a deeply nested `json!` literal; the default macro recursion budget
+// is not enough for the full document shape.
+#![recursion_limit = "256"]
+
 pub mod color;
 pub mod model;
 pub mod ops;
@@ -8,8 +12,8 @@ pub mod schema;
 
 pub use color::Rgba;
 pub use model::{
-    Align, Asset, Blend, Comp, Doc, EvaluatedLayer, Layer, LayerKind, Licence, Matte, Modifier,
-    Shape, ShapeKind, Solid, Text, Transform,
+    Align, AnimKind, AnimUnit, Asset, Blend, Comp, Doc, EvaluatedLayer, Layer, LayerKind, Licence,
+    Matte, Modifier, Shape, ShapeKind, Solid, Text, TextAnim, Transform,
 };
 pub use ops::{AppliedResult, Op};
 pub use prop::{Ease, EvalError, Keyframe, Prop};

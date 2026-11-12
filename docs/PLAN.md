@@ -66,6 +66,11 @@ tightens display and opens small text, leading that runs 1.5 → 1.1 with size, 
 with a stated reason and a role assignment, and the `TYPE-SCALE` detector that snaps an
 off-scale size and reports a fifth size as advisory.
 
+Text animation is in the document, not bolted on: `text.anim` is `reveal` or `rise`, per
+character, word or line, with stagger, duration, easing and travel distance, evaluated per
+glyph on the layer's own clock. The starter uses it, because a staggered resolve is the
+difference between a title and a template.
+
 Colour: `kinema-palette` builds a palette from one accent in OKLCH — a ground, a raised
 surface, text, a muted tone that still passes at 4.5:1, and an accent proven at 3:1 on the
 ground with its ink proven at 4.5:1 on itself. Chroma is clamped by bisection to what sRGB

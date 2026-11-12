@@ -91,7 +91,20 @@ pub fn doc_schema() -> Value {
                             "italic": {"type": "boolean"},
                             "tracking": {"type": "number"},
                             "align": {"enum": ["left", "center", "right"]},
-                            "line_height": {"type": "number", "exclusiveMinimum": 0, "description": "multiple of the size between baselines"}
+                            "line_height": {"type": "number", "exclusiveMinimum": 0, "description": "multiple of the size between baselines"},
+                            "anim": {
+                                "type": "object",
+                                "required": ["type"],
+                                "description": "staggered per-glyph entrance, on the layer's own clock",
+                                "properties": {
+                                    "type": {"enum": ["reveal", "rise"]},
+                                    "stagger": {"type": "number", "minimum": 0, "description": "seconds between units"},
+                                    "duration": {"type": "number", "exclusiveMinimum": 0, "description": "seconds per unit"},
+                                    "unit": {"enum": ["char", "word", "line"]},
+                                    "ease": {"type": "string", "examples": ["linear", "bezier(.2,.9,.1,1)"]},
+                                    "distance": {"type": "number", "minimum": 0, "description": "pixels travelled by rise"}
+                                }
+                            }
                         }
                     },
                     "shape": {

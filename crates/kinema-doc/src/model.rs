@@ -196,6 +196,103 @@ pub struct Text {
     /// Multiple of the type size between baselines. Ignored for a single line.
     #[serde(default = "default_line_height")]
     pub line_height: f64,
+    /// Optional staggered entrance, applied per glyph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anim: Option<TextAnim>,
+}
+
+/// What a staggered entrance does to each unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnimKind {
+    /// Fade in place.
+    Reveal,
+    /// Fade while rising into place.
+    Rise,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AnimUnit {
+    #[default]
+    Char,
+    Word,
+    Line,
+}
+
+/// A staggered entrance, evaluated per glyph against the layer's own clock.
+///
+/// `stagger` is the delay between units and `duration` the length of one unit's
+/// entrance, both in seconds of local time, so the animation travels with the layer
+/// rather than with the comp.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextAnim {
+    #[serde(rename = "type")]
+    pub kind: AnimKind,
+    #[serde(default = "default_anim_stagger")]
+    pub stagger: f64,
+    #[serde(default = "default_anim_duration")]
+    pub duration: f64,
+    #[serde(default)]
+    pub unit: AnimUnit,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ease: Option<String>,
+    /// Pixels travelled by `rise`; ignored by `reveal`.
+    #[serde(default = "default_rise_distance")]
+    pub distance: f64,
+}
+
+fn default_anim_stagger() -> f64 {
+    0.035
+}
+
+fn default_anim_duration() -> f64 {
+    0.45
+}
+
+fn default_rise_distance() -> f64 {
+    24.0
+}
+
+impl TextAnim {
+    fn unit_index(&self, char_index: usize, word_index: usize, line_index: usize) -> usize {
+        match self.unit {
+            AnimUnit::Char => char_index,
+            AnimUnit::Word => word_index,
+            AnimUnit::Line => line_index,
+        }
+    }
+
+    /// `(alpha multiplier, vertical offset in pixels)` for one unit at local time `t`.
+    pub fn at(&self, t: f64, unit_index: usize) -> (f64, f64) {
+        let start = unit_index as f64 * self.stagger.max(0.0);
+        let u = if self.duration <= 0.0 {
+            1.0
+        } else {
+            (t - start) / self.duration
+        };
+        let e = crate::prop::Ease::parse(self.ease.as_deref()).apply(u);
+        match self.kind {
+            AnimKind::Reveal => (e, 0.0),
+            AnimKind::Rise => (e, -self.distance * (1.0 - e)),
+        }
+    }
+
+    /// `(alpha, dy)` for a specific glyph.
+    pub fn at_glyph(
+        &self,
+        t: f64,
+        char_index: usize,
+        word_index: usize,
+        line_index: usize,
+    ) -> (f64, f64) {
+        self.at(t, self.unit_index(char_index, word_index, line_index))
+    }
+
+    /// How long the whole entrance takes for `units` units.
+    pub fn total(&self, units: usize) -> f64 {
+        units.saturating_sub(1) as f64 * self.stagger.max(0.0) + self.duration.max(0.0)
+    }
 }
 
 fn default_line_height() -> f64 {
@@ -436,6 +533,16 @@ impl Doc {
                     tracking: 0.0,
                     align: Align::Center,
                     line_height: default_line_height(),
+                    // The letters resolve left to right, which is the one entrance that
+                    // never looks like a template.
+                    anim: Some(TextAnim {
+                        kind: AnimKind::Reveal,
+                        stagger: 0.03,
+                        duration: 0.4,
+                        unit: AnimUnit::Char,
+                        ease: Some("bezier(.2,.9,.1,1)".into()),
+                        distance: 24.0,
+                    }),
                 }),
                 shape: None,
                 mattes: None,
@@ -648,6 +755,7 @@ mod tests {
             tracking: 0.0,
             align: Align::Center,
             line_height: 1.2,
+            anim: None,
         };
         let small = t.metrics();
         t.size = 140.0;
@@ -668,6 +776,7 @@ mod tests {
             tracking: 0.0,
             align: Align::Left,
             line_height: 1.5,
+            anim: None,
         };
         let two = t.metrics();
         assert_eq!(t.lines().len(), 2);

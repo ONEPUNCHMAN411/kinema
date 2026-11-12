@@ -170,6 +170,13 @@ fn capabilities() -> Value {
         ],
         "checks_advisory": {"HOLD-NONE": "the remedy is which beat to hold; the hint names it, the engine will not pick"},
         "checks_pending": ["CUT-TIMING", "JUMPCUT", "BANDING", "LOUD"],
+        "text_anim": {
+            "types": ["reveal", "rise"],
+            "units": ["char", "word", "line"],
+            "clock": "layer-local seconds, so the entrance travels with the layer",
+            "fields": {"stagger": "seconds between units", "duration": "seconds per unit", "ease": "linear|hold|bezier(x1,y1,x2,y2)", "distance": "pixels for rise"},
+            "path": "comp:<id>/layer:<id>/text.anim",
+        },
         "motion_blur": {
             "setting": "comp:<id>/shutter, degrees; 0 disables",
             "film_default": 180,

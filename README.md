@@ -72,6 +72,11 @@ reproducibility claim stated as a command.
 Not built yet: GPU raster, media decode, encode, audio, assets, capture, templates, MCP.
 Each returns a typed `not-implemented` error with a hint rather than pretending.
 
+Text carries a staggered entrance of its own: `text.anim` is `reveal` or `rise`, per
+character, word or line, with its own stagger, duration and easing, evaluated on the
+layer's clock. The starter uses it, so the letters resolve left to right without the
+project asking for it.
+
 `kin type` publishes the modular scale an agent should be choosing from, with optical
 tracking and leading per step, and `kin typeface recommend "<brief>"` turns a brief into a
 pairing with a stated reason plus a role assignment. `TYPE-SCALE` closes the loop: a size

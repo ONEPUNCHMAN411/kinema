@@ -16,6 +16,29 @@ pub struct Canvas {
     pub data: Vec<u8>,
 }
 
+/// Everything needed to set one block of type.
+#[derive(Debug, Clone, Copy)]
+pub struct TextDraw<'a> {
+    pub text: &'a str,
+    pub box_x: f64,
+    pub box_y: f64,
+    pub box_w: f64,
+    pub font: &'a str,
+    pub weight: u16,
+    pub italic: bool,
+    pub size: f64,
+    pub tracking: f64,
+    pub line_height: f64,
+    pub align: kinema_doc::Align,
+    pub color: Rgba,
+    pub alpha: f64,
+    pub mode: Blend,
+    /// Staggered entrance, if the block has one.
+    pub anim: Option<&'a kinema_doc::TextAnim>,
+    /// Layer-local seconds, which is the clock the animator reads.
+    pub time: f64,
+}
+
 impl Canvas {
     pub fn new(width: u32, height: u32) -> Self {
         Canvas {
@@ -160,55 +183,48 @@ impl Canvas {
         }
     }
 
-    /// Draw a block of lines inside a box with a bundled face, honouring alignment.
+    /// Draw a block of lines inside a box with a bundled face, honouring alignment and
+    /// the block's own staggered entrance.
     ///
     /// Glyphs are rasterised by the face itself and composited by coverage, so a 96 px
     /// title is a real rendering of the outline rather than an enlarged pixel grid.
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw_text_block(
-        &mut self,
-        text: &str,
-        box_x: f64,
-        box_y: f64,
-        box_w: f64,
-        font: &str,
-        weight: u16,
-        italic: bool,
-        size: f64,
-        tracking: f64,
-        line_height: f64,
-        align: kinema_doc::Align,
-        color: Rgba,
-        alpha: f64,
-        mode: Blend,
-    ) {
-        let align = match align {
+    pub fn draw_text_block(&mut self, d: &TextDraw<'_>) {
+        let align = match d.align {
             kinema_doc::Align::Left => kinema_text::Align::Left,
             kinema_doc::Align::Center => kinema_text::Align::Center,
             kinema_doc::Align::Right => kinema_text::Align::Right,
         };
         let placed = kinema_text::layout(
-            text,
-            font,
-            weight,
-            italic,
-            size as f32,
-            tracking as f32,
-            line_height as f32,
+            d.text,
+            d.font,
+            d.weight,
+            d.italic,
+            d.size as f32,
+            d.tracking as f32,
+            d.line_height as f32,
             align,
-            box_x as f32,
-            box_y as f32,
-            box_w as f32,
+            d.box_x as f32,
+            d.box_y as f32,
+            d.box_w as f32,
         );
         for p in placed {
             if p.ch.is_whitespace() {
                 continue;
             }
-            let (metrics, bitmap) = p.face.rasterize(p.ch, size as f32);
+            let (anim_alpha, dy) = match d.anim {
+                Some(a) => a.at_glyph(d.time, p.char_index, p.word_index, p.line_index),
+                None => (1.0, 0.0),
+            };
+            let alpha = d.alpha * anim_alpha;
+            if alpha <= 0.0 {
+                continue;
+            }
+            let (metrics, bitmap) = p.face.rasterize(p.ch, d.size as f32);
             if metrics.width == 0 || metrics.height == 0 {
                 continue;
             }
-            let (gx, gy) = kinema_text::glyph_origin(&p, &metrics);
+            let (gx, gy0) = kinema_text::glyph_origin(&p, &metrics);
+            let gy = gy0 + dy as f32;
             for row in 0..metrics.height {
                 let y = (gy + row as f32).floor();
                 if !(0.0..self.height as f32).contains(&y) {
@@ -223,7 +239,7 @@ impl Canvas {
                     if !(0.0..self.width as f32).contains(&x) {
                         continue;
                     }
-                    self.composite(x as u32, y as u32, color, coverage * alpha, mode);
+                    self.composite(x as u32, y as u32, d.color, coverage * alpha, d.mode);
                 }
             }
         }
@@ -359,22 +375,24 @@ fn draw_at(
                     skipped.insert(layer.id.clone());
                     continue;
                 };
-                canvas.draw_text_block(
-                    &text.string,
-                    bx,
-                    by,
-                    bw,
-                    &text.font,
-                    text.weight,
-                    text.italic,
-                    text.size * scale,
-                    text.tracking * scale,
-                    text.line_height,
-                    text.align,
-                    text.color,
+                canvas.draw_text_block(&TextDraw {
+                    text: &text.string,
+                    box_x: bx,
+                    box_y: by,
+                    box_w: bw,
+                    font: &text.font,
+                    weight: text.weight,
+                    italic: text.italic,
+                    size: text.size * scale,
+                    tracking: text.tracking * scale,
+                    line_height: text.line_height,
+                    align: text.align,
+                    color: text.color,
                     alpha,
-                    layer.blend,
-                );
+                    mode: layer.blend,
+                    anim: text.anim.as_ref(),
+                    time: t - layer.start,
+                });
             }
             other => {
                 return Err(RenderError::Unsupported {
@@ -509,22 +527,24 @@ mod tests {
     #[test]
     fn text_puts_ink_on_the_canvas() {
         let mut canvas = Canvas::new(500, 140);
-        canvas.draw_text_block(
-            "HELLO",
-            10.0,
-            10.0,
-            480.0,
-            "Lato",
-            700,
-            false,
-            70.0,
-            0.0,
-            1.2,
-            kinema_doc::Align::Left,
-            Rgba::WHITE,
-            1.0,
-            Blend::Normal,
-        );
+        canvas.draw_text_block(&TextDraw {
+            text: "HELLO",
+            box_x: 10.0,
+            box_y: 10.0,
+            box_w: 480.0,
+            font: "Lato",
+            weight: 700,
+            italic: false,
+            size: 70.0,
+            tracking: 0.0,
+            line_height: 1.2,
+            align: kinema_doc::Align::Left,
+            color: Rgba::WHITE,
+            alpha: 1.0,
+            mode: Blend::Normal,
+            anim: None,
+            time: 0.0,
+        });
         let inked = canvas.data.chunks(4).filter(|p| p[3] > 0).count();
         assert!(inked > 2000, "expected letterforms, got {inked} pixels");
         let partial = canvas
@@ -539,24 +559,58 @@ mod tests {
     }
 
     #[test]
+    fn a_staggered_reveal_brings_the_letters_in_over_time() {
+        // The background is opaque and full-frame, so count pixels brighter than it: the
+        // title is the only light thing on the canvas, and a half-faded glyph still counts.
+        let ink = |px: &[u8]| px.chunks(4).filter(|p| p[0] > 60).count();
+        let mut doc = Doc::starter();
+        let anim = kinema_doc::TextAnim {
+            kind: kinema_doc::AnimKind::Reveal,
+            stagger: 0.1,
+            duration: 0.3,
+            unit: kinema_doc::AnimUnit::Char,
+            ease: None,
+            distance: 0.0,
+        };
+        doc.comps.get_mut("main").unwrap().layers[2]
+            .text
+            .as_mut()
+            .unwrap()
+            .anim = Some(anim);
+        // Frame 6 is the title's first frame (0.2 s), frame 33 is 1.1 s and well past
+        // the last character's entrance.
+        let early = render_frame(&doc, "main", 6, 1.0).unwrap();
+        let mid = render_frame(&doc, "main", 12, 1.0).unwrap();
+        let late = render_frame(&doc, "main", 33, 1.0).unwrap();
+        assert!(ink(&early.pixels) < ink(&mid.pixels), "more letters arrive");
+        assert!(ink(&mid.pixels) < ink(&late.pixels), "and more after that");
+        assert!(
+            ink(&early.pixels) < ink(&late.pixels) / 2,
+            "frame 6 is early"
+        );
+    }
+
+    #[test]
     fn two_lines_land_in_two_bands() {
         let mut canvas = Canvas::new(400, 300);
-        canvas.draw_text_block(
-            "TOP\nBOTTOM",
-            0.0,
-            10.0,
-            400.0,
-            "Lato",
-            400,
-            false,
-            60.0,
-            0.0,
-            1.2,
-            kinema_doc::Align::Center,
-            Rgba::WHITE,
-            1.0,
-            Blend::Normal,
-        );
+        canvas.draw_text_block(&TextDraw {
+            text: "TOP\nBOTTOM",
+            box_x: 0.0,
+            box_y: 10.0,
+            box_w: 400.0,
+            font: "Lato",
+            weight: 400,
+            italic: false,
+            size: 60.0,
+            tracking: 0.0,
+            line_height: 1.2,
+            align: kinema_doc::Align::Center,
+            color: Rgba::WHITE,
+            alpha: 1.0,
+            mode: Blend::Normal,
+            anim: None,
+            time: 0.0,
+        });
         let row_has_ink = |y: usize| (0..400).any(|x| canvas.get(x as u32, y as u32).a > 0);
         // Box top is 10; the first baseline sits one ascent below it, so caps start around
         // row 26. The second line is one 1.2 leading (72 px) lower.
@@ -570,22 +624,24 @@ mod tests {
     fn alignment_moves_the_line_inside_its_box() {
         let ink_x = |align: kinema_doc::Align| -> i32 {
             let mut canvas = Canvas::new(400, 100);
-            canvas.draw_text_block(
-                "HI",
-                0.0,
-                0.0,
-                400.0,
-                "Lato",
-                400,
-                false,
-                60.0,
-                0.0,
-                1.2,
+            canvas.draw_text_block(&TextDraw {
+                text: "HI",
+                box_x: 0.0,
+                box_y: 0.0,
+                box_w: 400.0,
+                font: "Lato",
+                weight: 400,
+                italic: false,
+                size: 60.0,
+                tracking: 0.0,
+                line_height: 1.2,
                 align,
-                Rgba::WHITE,
-                1.0,
-                Blend::Normal,
-            );
+                color: Rgba::WHITE,
+                alpha: 1.0,
+                mode: Blend::Normal,
+                anim: None,
+                time: 0.0,
+            });
             (0..400)
                 .find(|x| (0..100).any(|y| canvas.get(*x as u32, y).a > 0))
                 .unwrap_or(999)

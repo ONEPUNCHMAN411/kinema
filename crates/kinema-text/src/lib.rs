@@ -266,6 +266,12 @@ pub struct Placed {
     pub face: &'static Face,
     pub x: f32,
     pub baseline: f32,
+    /// Position in the block counting every character, which is what a `char` stagger
+    /// indexes.
+    pub char_index: usize,
+    /// Word number, incremented on whitespace, for a `word` stagger.
+    pub word_index: usize,
+    pub line_index: usize,
 }
 
 /// Lay a block out inside a box. `box_y` is the top of the block, not the baseline.
@@ -286,6 +292,8 @@ pub fn layout(
     let face = resolve(family, weight, italic);
     let (ascent, _) = face.vertical(size);
     let mut out = Vec::new();
+    let mut char_index = 0usize;
+    let mut word_index = 0usize;
     for (i, line) in text.split('\n').enumerate() {
         let width = line_width(family, weight, italic, line, size, tracking);
         let start = match align {
@@ -300,12 +308,19 @@ pub fn layout(
             if let Some(p) = prev {
                 pen += face.kern(p, ch, size);
             }
+            if ch.is_whitespace() {
+                word_index += 1;
+            }
             out.push(Placed {
                 ch,
                 face,
                 x: pen,
                 baseline,
+                char_index,
+                word_index,
+                line_index: i,
             });
+            char_index += 1;
             pen += face.metrics(ch, size).advance_width + tracking;
             prev = Some(ch);
         }
