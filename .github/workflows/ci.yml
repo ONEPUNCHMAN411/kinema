@@ -28,14 +28,15 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test --all
+      # `cargo run` rather than the binary path, so the .exe suffix on Windows is not a
+      # shell problem.
       - name: Vertical slice
         shell: bash
         run: |
           set -euo pipefail
-          cargo build
-          KIN=target/debug/kin
-          "$KIN" new target/slice
-          "$KIN" render --project target/slice --frame 0 -o target/slice/f0.png
-          "$KIN" probe --project target/slice --at 1.0 > /dev/null
-          "$KIN" check --project target/slice
-          test -s target/slice/f0.png
+          kin() { cargo run --quiet -- "$@"; }
+          kin new target/slice
+          kin render --project target/slice --frame 30 -o target/slice/f30.png
+          kin probe --project target/slice --at 1.0 > /dev/null
+          kin check --project target/slice
+          test -s target/slice/f30.png
