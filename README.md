@@ -58,9 +58,10 @@ Built:
 
 The document supports `solid`, `text` and `shape` layers; properties support constants,
 keyframes, links and expressions. `graph` returns a typed `not-implemented` with a hint
-that names the phase. Text is set in real bundled faces: **Lato** (400, 700 and a real
-italic) and **Space Mono** (400, 700), each OFL-1.1 with its licence text beside it in
-`assets/fonts`. `kin fonts` lists them with attribution, and `TYPE-FAKE` reports a family,
+that names the phase. Text is set in real bundled faces, each OFL-1.1 with its licence
+text beside it in `assets/fonts`: **Lato** (400, 700, real italic), **Space Mono** (400,
+700), **PT Serif** (400, 700, real italic), **Abril Fatface** (display) and **Bebas Neue**
+(condensed display). `kin fonts` lists them with attribution, and `TYPE-FAKE` reports a family,
 weight or italic the bundle does not actually ship — there is no synthetic oblique and no
 invented 500.
 

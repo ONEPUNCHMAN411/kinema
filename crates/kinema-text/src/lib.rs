@@ -44,11 +44,22 @@ const LATO_B: &[u8] = include_bytes!("../../../assets/fonts/Lato-Bold.ttf");
 const LATO_I: &[u8] = include_bytes!("../../../assets/fonts/Lato-Italic.ttf");
 const MONO_R: &[u8] = include_bytes!("../../../assets/fonts/SpaceMono-Regular.ttf");
 const MONO_B: &[u8] = include_bytes!("../../../assets/fonts/SpaceMono-Bold.ttf");
+const SERIF_R: &[u8] = include_bytes!("../../../assets/fonts/PTSerif-Regular.ttf");
+const SERIF_B: &[u8] = include_bytes!("../../../assets/fonts/PTSerif-Bold.ttf");
+const SERIF_I: &[u8] = include_bytes!("../../../assets/fonts/PTSerif-Italic.ttf");
+const ABRIL: &[u8] = include_bytes!("../../../assets/fonts/AbrilFatface-Regular.ttf");
+const BEBAS: &[u8] = include_bytes!("../../../assets/fonts/BebasNeue-Regular.ttf");
 
 const LATO_AUTHOR: &str = "Łukasz Dziedzic (tyPoland)";
 const MONO_AUTHOR: &str = "The Space Mono Project Authors";
+const SERIF_AUTHOR: &str = "ParaType (Korolkova, Umpeleva, Yefimov)";
+const ABRIL_AUTHOR: &str = "TypeTogether (Burian, Scaglione)";
+const BEBAS_AUTHOR: &str = "Ryoichi Tsunekawa (Flat it type)";
 const LATO_LICENCE: &str = "assets/fonts/OFL-Lato.txt";
 const MONO_LICENCE: &str = "assets/fonts/OFL-SpaceMono.txt";
+const SERIF_LICENCE: &str = "assets/fonts/OFL-PTSerif.txt";
+const ABRIL_LICENCE: &str = "assets/fonts/OFL-AbrilFatface.txt";
+const BEBAS_LICENCE: &str = "assets/fonts/OFL-BebasNeue.txt";
 
 pub const FACES: &[FaceInfo] = &[
     face!(
@@ -90,6 +101,46 @@ pub const FACES: &[FaceInfo] = &[
         "assets/fonts/SpaceMono-Bold.ttf",
         MONO_AUTHOR,
         MONO_LICENCE
+    ),
+    face!(
+        "PT Serif",
+        400,
+        false,
+        "assets/fonts/PTSerif-Regular.ttf",
+        SERIF_AUTHOR,
+        SERIF_LICENCE
+    ),
+    face!(
+        "PT Serif",
+        700,
+        false,
+        "assets/fonts/PTSerif-Bold.ttf",
+        SERIF_AUTHOR,
+        SERIF_LICENCE
+    ),
+    face!(
+        "PT Serif",
+        400,
+        true,
+        "assets/fonts/PTSerif-Italic.ttf",
+        SERIF_AUTHOR,
+        SERIF_LICENCE
+    ),
+    face!(
+        "Abril Fatface",
+        400,
+        false,
+        "assets/fonts/AbrilFatface-Regular.ttf",
+        ABRIL_AUTHOR,
+        ABRIL_LICENCE
+    ),
+    face!(
+        "Bebas Neue",
+        400,
+        false,
+        "assets/fonts/BebasNeue-Regular.ttf",
+        BEBAS_AUTHOR,
+        BEBAS_LICENCE
     ),
 ];
 
@@ -187,7 +238,9 @@ impl Face {
 fn registry() -> &'static Vec<Face> {
     static REGISTRY: OnceLock<Vec<Face>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
-        let bytes: [&'static [u8]; 5] = [LATO_R, LATO_B, LATO_I, MONO_R, MONO_B];
+        let bytes: [&'static [u8]; 10] = [
+            LATO_R, LATO_B, LATO_I, MONO_R, MONO_B, SERIF_R, SERIF_B, SERIF_I, ABRIL, BEBAS,
+        ];
         FACES
             .iter()
             .zip(bytes)
@@ -399,15 +452,30 @@ mod tests {
 
     #[test]
     fn the_bundled_faces_parse_and_are_listed() {
-        assert_eq!(families(), vec!["Lato", "Space Mono"]);
+        assert_eq!(
+            families(),
+            vec![
+                "Lato",
+                "Space Mono",
+                "PT Serif",
+                "Abril Fatface",
+                "Bebas Neue"
+            ]
+        );
         assert_eq!(weights("Lato"), vec![400, 700]);
         assert_eq!(weights("Space Mono"), vec![400, 700]);
+        assert_eq!(weights("PT Serif"), vec![400, 700]);
         assert!(has_italic("Lato"));
+        assert!(has_italic("PT Serif"));
         assert!(
             !has_italic("Space Mono"),
             "no oblique is bundled for the mono"
         );
-        assert_eq!(FACES.len(), 5);
+        assert!(
+            !has_italic("Bebas Neue"),
+            "the condensed display face has no italic"
+        );
+        assert_eq!(FACES.len(), 10);
         for f in FACES {
             assert_eq!(f.spdx, "OFL-1.1");
             let on_disk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

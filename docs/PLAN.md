@@ -54,8 +54,9 @@ tokens. Kinema supplies both.
   pairings with reasons. `type set --scale 1.25` applies a modular scale with per-size
   tracking and leading.
 
-Built in P0: `kinema-text` bundles five faces (`Lato` 400/700/italic, `Space Mono`
-400/700) with their OFL text, resolves family + weight + style to a real face, lays out
+Built in P0: `kinema-text` bundles ten faces across five families — `Lato` 400/700/italic,
+`Space Mono` 400/700, `PT Serif` 400/700/italic, `Abril Fatface` and `Bebas Neue` — with
+their OFL text, resolves family + weight + style to a real face, lays out
 lines with kerning, tracking, leading and alignment, and rasterises outlines with
 coverage. `kin fonts` is the catalogue; `TYPE-FAKE` now fires only where the bundle truly
 has no such face. The ~40-family library, classification fields, pairings and

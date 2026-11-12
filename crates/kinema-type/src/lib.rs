@@ -140,6 +140,40 @@ pub const PAIRINGS: &[Pairing] = &[
         ],
     },
     Pairing {
+        id: "editorial-serif",
+        display: "PT Serif",
+        body: "PT Serif",
+        mono: "Space Mono",
+        why: "a serif for a reading piece: one family carries title and body, so the \
+              hierarchy is size and space rather than a second voice",
+        use_when: &[
+            "magazine",
+            "essay",
+            "documentary",
+            "historical",
+            "literary",
+            "luxury",
+        ],
+    },
+    Pairing {
+        id: "poster",
+        display: "Abril Fatface",
+        body: "Lato",
+        mono: "Space Mono",
+        why: "a fat face earns the headline; the grotesque handles the small type without \
+              competing for attention",
+        use_when: &["poster", "campaign", "event", "loud", "title", "music"],
+    },
+    Pairing {
+        id: "condensed",
+        display: "Bebas Neue",
+        body: "Lato",
+        mono: "Space Mono",
+        why: "condensed caps fit a long title into a lower third without shrinking it, which \
+              is why broadcast graphics use them",
+        use_when: &["sports", "news", "lower-third", "score", "broadcast"],
+    },
+    Pairing {
         id: "quiet",
         display: "Lato",
         body: "Lato",
@@ -246,6 +280,10 @@ mod tests {
         assert_eq!(p.id, "editorial");
         let (p, _) = recommend("something else entirely");
         assert_eq!(p.id, "editorial", "the first pairing is the tie-break");
+        let (p, _) = recommend("a poster campaign with a loud title");
+        assert_eq!(p.id, "poster");
+        let (p, _) = recommend("a sports lower-third for a score");
+        assert_eq!(p.id, "condensed");
     }
 
     #[test]
