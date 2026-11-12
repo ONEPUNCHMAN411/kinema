@@ -838,13 +838,45 @@ fn apply_modifier(
                 .unwrap_or(Rgba::opaque(255, 255, 255));
             let pad = num("radius", 24.0) * scale;
             let rect = grow(pad, canvas.width, canvas.height);
-            glow(
+            silhouette_shadow(
                 canvas,
                 own,
                 rect,
                 num("radius", 24.0) * scale,
                 num("strength", 0.5),
                 color,
+                [0.0, 0.0],
+                Blend::Screen,
+            );
+            Ok(())
+        }
+        "drop-shadow" => {
+            let color = m
+                .params
+                .get("color")
+                .and_then(|v| serde_json::from_value::<Rgba>(v.clone()).ok())
+                .unwrap_or(Rgba::BLACK);
+            let offset: [f64; 2] = m
+                .params
+                .get("offset")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or([0.0, 6.0]);
+            let radius = num("radius", 18.0) * scale;
+            let shift = [offset[0] * scale, offset[1] * scale];
+            let rect = grow(
+                radius + shift[0].abs().max(shift[1].abs()),
+                canvas.width,
+                canvas.height,
+            );
+            silhouette_shadow(
+                canvas,
+                own,
+                rect,
+                radius,
+                num("strength", 0.6),
+                color,
+                shift,
+                Blend::Normal,
             );
             Ok(())
         }
@@ -907,17 +939,20 @@ fn blur_region(own: &mut Canvas, rect: [u32; 4], radius: f64) {
     }
 }
 
-/// A blurred copy of the layer's coverage, added to the frame as light.
+/// A blurred copy of the layer's coverage, shifted by `offset` and laid onto the frame.
 ///
 /// Only `rect` is considered: the layer's box grown by the radius. Everything outside it is
-/// known to be unlit.
-fn glow(
+/// known to be untouched. `Screen` makes it glow underneath; `Normal` makes it a shadow.
+#[allow(clippy::too_many_arguments)]
+fn silhouette_shadow(
     canvas: &mut Canvas,
     own: &Canvas,
     rect: [u32; 4],
     radius: f64,
     strength: f64,
     color: Rgba,
+    offset: [f64; 2],
+    mode: Blend,
 ) {
     if strength <= 0.0 {
         return;
@@ -928,10 +963,17 @@ fn glow(
     }
     let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
     let r = (radius.max(1.0) / 3.0).round().max(1.0) as usize;
+    let (dx, dy) = (offset[0].round() as i64, offset[1].round() as i64);
     let mut a: Vec<f32> = Vec::with_capacity(w * h);
     for y in 0..h {
         for x in 0..w {
-            a.push(own.get(x0 + x as u32, y0 + y as u32).a as f32 / 255.0);
+            let sx = x0 as i64 + x as i64 - dx;
+            let sy = y0 as i64 + y as i64 - dy;
+            if sx < 0 || sy < 0 || sx >= own.width as i64 || sy >= own.height as i64 {
+                a.push(0.0);
+            } else {
+                a.push(own.get(sx as u32, sy as u32).a as f32 / 255.0);
+            }
         }
     }
     let mut tmp = vec![0f32; a.len()];
@@ -947,13 +989,7 @@ fn glow(
             continue;
         }
         let (px, py) = (x0 + (i % w) as u32, y0 + (i / w) as u32);
-        canvas.composite(
-            px,
-            py,
-            Rgba::opaque(color.r, color.g, color.b),
-            cover,
-            Blend::Screen,
-        );
+        canvas.composite(px, py, Rgba::opaque(color.r, color.g, color.b), cover, mode);
     }
 }
 
@@ -1320,6 +1356,25 @@ mod tests {
         assert!(px(160, 90) > 200, "the middle stays bright");
         assert!(px(183, 90) > 5, "light spills past the bar's edge");
         assert!(px(4, 4) < 5, "and not to the corner");
+    }
+
+    #[test]
+    fn a_drop_shadow_falls_below_and_to_the_right() {
+        let mut bar = rect("bar", [40.0, 40.0], Rgba::opaque(255, 255, 255));
+        bar.modifiers = vec![kinema_doc::Modifier {
+            kind: "drop-shadow".into(),
+            params:
+                json!({"radius": 8.0, "strength": 1.0, "offset": [20.0, 20.0], "color": "#000000"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+        }];
+        let doc = comp_of(vec![solid("bg", Rgba::opaque(255, 255, 255)), bar]);
+        let out = render_frame(&doc, "main", 0, 1.0).unwrap();
+        let px = |x: u32, y: u32| out.pixels[((y * out.width + x) * 4) as usize];
+        assert!(px(160, 90) == 255, "the bar itself is untouched");
+        assert!(px(190, 120) < 150, "the shadow is down and to the right");
+        assert!(px(130, 60) == 255, "and not up and to the left");
     }
 
     #[test]

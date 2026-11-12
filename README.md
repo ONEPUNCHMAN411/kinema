@@ -111,7 +111,8 @@ an error, so `kin probe` both bboxes before wondering where the picture went.
 
 Modifiers are applied, not ignored, and `set-modifier` gives them the same typed op and
 inverse as everything else. `blur` softens the layer itself, premultiplying colour first
-so a soft edge does not pick up the colour of the transparent pixels next to it; `glow`
+so a soft edge does not pick up the colour of the transparent pixels next to it;
+`drop-shadow` lays the same silhouette down and to the right of the layer, under it; `glow`
 blurs the layer's own coverage and adds it to the frame as light under the layer, working only over the layer's box grown by its radius
 so a 40 px glow costs what a 40 px box costs rather than what the canvas costs (652 ms a
 frame before that crop, 119 ms after). Any other modifier type is an error naming the
