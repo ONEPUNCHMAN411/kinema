@@ -68,8 +68,14 @@ reproducibility claim stated as a command.
 Not built yet: GPU raster, media decode, encode, audio, assets, capture, templates, MCP.
 Each returns a typed `not-implemented` error with a hint rather than pretending.
 
-Detectors live in this build: `TYPE-FAKE`, `READ`, `CHROMA`, `PALETTE`, `EASE-FLAT`,
-`SHUTTER`, `HOLD-NONE` and `STAGGER`. All but `HOLD-NONE` ship a `fix_op`, and `kin check --fix`
+`kin type` publishes the modular scale an agent should be choosing from, with optical
+tracking and leading per step, and `kin typeface recommend "<brief>"` turns a brief into a
+pairing with a stated reason plus a role assignment. `TYPE-SCALE` closes the loop: a size
+off the scale is a defect with the step to snap to, and more than four sizes is reported
+with no remedy, because choosing which size to drop is a directing call.
+
+Detectors live in this build: `TYPE-FAKE`, `TYPE-SCALE`, `READ`, `CHROMA`, `PALETTE`,
+`EASE-FLAT`, `SHUTTER`, `HOLD-NONE` and `STAGGER`. All but `HOLD-NONE` ship a `fix_op`, and `kin check --fix`
 applies them to a fixpoint: remedies are measured against one snapshot, so CHROMA's
 remedy and READ's can disagree, and only re-measuring after each step settles it. The
 remaining detectors are specified with their thresholds in `docs/PLAN.md` and land with

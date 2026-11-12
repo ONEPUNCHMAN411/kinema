@@ -57,6 +57,7 @@ pub fn run(doc: &Doc, comp: &str, frame: Option<u32>) -> Vec<Defect> {
     let frame_of = |t: f64| fps.ticks_to_frame(kinema_time::seconds_to_ticks(t));
 
     type_fake(doc, comp, &mut out);
+    type_scale(doc, comp, &mut out);
     read(doc, comp, &mut out);
     chroma(doc, comp, &mut out);
     palette(doc, comp, &mut out);
@@ -316,6 +317,68 @@ fn chroma(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
                 json!(fixed.to_hex()),
                 "drop the text to a neutral so chroma subsampling cannot smear it",
             )),
+        });
+    }
+}
+
+/// Sizes should come from the modular scale, and there should be few of them.
+fn type_scale(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
+    let Ok(c) = doc.comp(comp) else { return };
+    let steps = kinema_type::house_ladder();
+    let mut sizes: Vec<f64> = Vec::new();
+    for layer in &c.layers {
+        let Some(text) = &layer.text else { continue };
+        if !sizes.iter().any(|s| (s - text.size).abs() < 0.5) {
+            sizes.push(text.size);
+        }
+        let Some((step, off)) = kinema_type::nearest_step(text.size, &steps) else {
+            continue;
+        };
+        // 3% is about a quarter of a step at a 1.25 ratio: below it the eye reads the
+        // size as the step, above it the size is simply off the system.
+        if off > 0.03 {
+            out.push(Defect {
+                code: "TYPE-SCALE",
+                severity: "warn",
+                comp: comp.into(),
+                layer: Some(layer.id.clone()),
+                frame: None,
+                evidence: json!({
+                    "reason": "off the scale",
+                    "size": text.size,
+                    "nearest": step.size,
+                    "role": kinema_type::role_of(step.index),
+                    "off_by_ratio": (off * 1000.0).round() / 1000.0,
+                }),
+                hint: format!(
+                    "{} px is not on the house scale; the nearest step is {} px ({})",
+                    text.size,
+                    step.size,
+                    kinema_type::role_of(step.index)
+                ),
+                fix_op: Some(set_prop(
+                    format!("comp:{comp}/layer:{}/text.size", layer.id),
+                    json!(step.size),
+                    "put the size on the modular scale",
+                )),
+            });
+        }
+    }
+    if sizes.len() > 4 {
+        out.push(Defect {
+            code: "TYPE-SCALE",
+            severity: "warn",
+            comp: comp.into(),
+            layer: None,
+            frame: None,
+            evidence: json!({
+                "reason": "too many sizes",
+                "distinct": sizes.len(),
+                "sizes": sizes,
+                "budget": 4,
+            }),
+            hint: "four sizes is a hierarchy; more is a slide deck. Which size to drop is a directing call, so `kin type` shows the ladder to choose from".into(),
+            fix_op: None,
         });
     }
 }
@@ -891,6 +954,53 @@ mod tests {
             400
         );
         assert!(!defects(&doc).iter().any(|d| d.code == "TYPE-FAKE"));
+    }
+
+    #[test]
+    fn an_off_scale_size_is_caught_and_snapped() {
+        let mut doc = Doc::starter();
+        doc.comps.get_mut("main").unwrap().layers[2]
+            .text
+            .as_mut()
+            .unwrap()
+            .size = 24.0;
+        let found = defects(&doc);
+        let d = found
+            .iter()
+            .find(|d| d.code == "TYPE-SCALE")
+            .expect("TYPE-SCALE");
+        assert_eq!(d.evidence["nearest"], 25.0);
+        let op: kinema_doc::Op = serde_json::from_value(d.fix_op.clone().unwrap()).unwrap();
+        doc.apply(&op).unwrap();
+        assert_eq!(
+            doc.comps["main"].layers[2].text.as_ref().unwrap().size,
+            25.0
+        );
+        assert!(!defects(&doc).iter().any(|d| d.code == "TYPE-SCALE"));
+    }
+
+    #[test]
+    fn too_many_sizes_is_advisory() {
+        let mut doc = Doc::starter();
+        let extra = doc.comps["main"].layers[2].clone();
+        for (i, size) in [25.0, 31.25, 39.06, 61.04].iter().enumerate() {
+            let mut layer = extra.clone();
+            layer.id = format!("t{i}");
+            let text = layer.text.as_mut().unwrap();
+            text.size = *size;
+            text.string = format!("LINE {i}");
+            doc.comps.get_mut("main").unwrap().layers.push(layer);
+        }
+        let found = defects(&doc);
+        let d = found
+            .iter()
+            .find(|d| d.code == "TYPE-SCALE" && d.evidence["reason"] == "too many sizes")
+            .expect("count defect");
+        assert!(
+            d.fix_op.is_none(),
+            "dropping a size is a directing call, so the hint names the budget instead"
+        );
+        assert!(d.evidence["distinct"].as_u64().unwrap() > 4);
     }
 
     #[test]

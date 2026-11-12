@@ -62,6 +62,8 @@ fn dispatch(argv: &[String]) -> R {
     match verb {
         "capabilities" => Ok(capabilities()),
         "fonts" | "typefaces" => Ok(cmd_fonts()),
+        "type" | "scale" => Ok(cmd_type(argv)),
+        "typeface" => Ok(cmd_typeface(argv)),
         "schema" => Ok(schema::doc_schema()),
         "help" | "--help" | "-h" => Ok(help()),
         "version" | "--version" | "-V" => {
@@ -146,6 +148,9 @@ fn capabilities() -> Value {
             {"name": "undo", "summary": "replay the journal's inverses", "args": ["--steps <n>", "--dry-run"]},
             {"name": "verify", "summary": "check a sequence manifest against disk, and with --render against a fresh render", "args": ["--manifest <file>", "--render"]},
             {"name": "diff", "summary": "what changed since a document, and which frames it invalidates", "args": ["--from <doc.json>", "--comp <id>"]},
+            {"name": "fonts", "summary": "bundled families, weights, licence and attribution", "args": []},
+            {"name": "type", "summary": "the modular scale with optical tracking and leading", "args": ["--base <px>", "--ratio <f>", "--steps <n>"]},
+            {"name": "typeface", "summary": "pick a pairing from a brief, with reasons and a role assignment", "args": ["recommend <brief>"]},
             {"name": "log", "summary": "the op journal", "args": []}
         ],
         "licences": ["cc0-1.0", "cc-by-4.0", "cc-by-sa-4.0", "cc-by-nc-4.0", "cc-by-nd-4.0", "mit", "apache-2.0", "bsd-3-clause", "ofl-1.1", "unknown"],
@@ -158,7 +163,8 @@ fn capabilities() -> Value {
             {"code": "EASE-FLAT", "severity": "warn", "detects": "linear or symmetric easing on moves over 200 ms or 2% of frame", "fix": true},
             {"code": "SHUTTER", "severity": "warn", "detects": "motion above 1.5 px/frame with no shutter", "fix": true},
             {"code": "HOLD-NONE", "severity": "warn", "detects": "no still moment in over three seconds", "fix": false},
-            {"code": "STAGGER", "severity": "warn", "detects": "more than 70% of layers entering on one frame", "fix": true}
+            {"code": "STAGGER", "severity": "warn", "detects": "more than 70% of layers entering on one frame", "fix": true},
+            {"code": "TYPE-SCALE", "severity": "warn", "detects": "a size off the modular scale, or more than four sizes", "fix": true}
         ],
         "checks_advisory": {"HOLD-NONE": "the remedy is which beat to hold; the hint names it, the engine will not pick"},
         "checks_pending": ["CUT-TIMING", "JUMPCUT", "BANDING", "LOUD"],
@@ -187,6 +193,81 @@ fn capabilities() -> Value {
 
 /// The bundle as data: what a document may name, what each family ships, and where its
 /// licence text lives.
+fn cmd_type(argv: &[String]) -> Value {
+    let num = |flag: &str, default: f64| {
+        get(argv, flag)
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(default)
+    };
+    let base = num("--base", kinema_type::HOUSE_BASE);
+    let ratio = num("--ratio", kinema_type::HOUSE_RATIO);
+    let steps = get(argv, "--steps")
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| (2..=16).contains(n))
+        .unwrap_or(kinema_type::HOUSE_STEPS);
+    let ladder = kinema_type::ladder(base, ratio, steps);
+    json!({
+        "ok": true,
+        "base": base,
+        "ratio": ratio,
+        "ladder": ladder
+            .iter()
+            .map(|s| json!({
+                "index": s.index,
+                "role": kinema_type::role_of(s.index),
+                "size": s.size,
+                "tracking": s.tracking,
+                "leading": s.leading,
+            }))
+            .collect::<Vec<_>>(),
+        "rules": [
+            "every text size should be a step here; TYPE-SCALE reports the ones that are not",
+            "tracking is optical: display tightens, small text opens up",
+            "leading follows the same curve: 1.5 at 16 px down to 1.1 at 96 px",
+            "at most four sizes per comp; a fifth reads as a slide deck"
+        ],
+    })
+}
+
+fn cmd_typeface(argv: &[String]) -> Value {
+    let pos = positionals(argv);
+    let brief = pos.iter().skip(2).cloned().collect::<Vec<_>>().join(" ");
+    let (pairing, matched) = kinema_type::recommend(&brief);
+    let ladder = kinema_type::house_ladder();
+    let role = |name: &str, index: usize| {
+        let s = ladder[index.min(ladder.len() - 1)];
+        json!({
+            "role": name,
+            "family": kinema_type::family_for(pairing, name),
+            "size": s.size,
+            "tracking": s.tracking,
+            "leading": s.leading,
+        })
+    };
+    json!({
+        "ok": true,
+        "brief": brief,
+        "pairing": {
+            "id": pairing.id,
+            "display": pairing.display,
+            "body": pairing.body,
+            "mono": pairing.mono,
+            "why": pairing.why,
+        },
+        "matched_keywords": matched,
+        "assignment": [
+            role("title", 4),
+            role("body", 1),
+            role("mono", 1),
+            role("caption", 0),
+        ],
+        "pairing_catalogue": kinema_type::PAIRINGS.iter().map(|p| json!({
+            "id": p.id, "display": p.display, "body": p.body, "mono": p.mono, "use_when": p.use_when
+        })).collect::<Vec<_>>(),
+        "apply_with": "set text.font, text.size, text.tracking and text.line_height from the assignment; `kin apply` takes them as ops",
+    })
+}
+
 fn fonts_catalogue() -> Value {
     let families: Vec<Value> = kinema_text::families()
         .iter()

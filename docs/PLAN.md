@@ -60,6 +60,11 @@ lines with kerning, tracking, leading and alignment, and rasterises outlines wit
 coverage. `kin fonts` is the catalogue; `TYPE-FAKE` now fires only where the bundle truly
 has no such face. The ~40-family library, classification fields, pairings and
 `typeface recommend` remain P4.
+
+Built in P0 as well: `kinema-type` — the house scale (16 px × 1.25), optical tracking that
+tightens display and opens small text, leading that runs 1.5 → 1.1 with size, pairings
+with a stated reason and a role assignment, and the `TYPE-SCALE` detector that snaps an
+off-scale size and reports a fifth size as advisory.
 - `palette from <image|brand|video>` extracts in OKLab, assigns roles (bg, surface, text,
   muted, accent), gamut-maps to Rec.709 so video never clips, and proves every
   text-on-surface pair with contrast ratios. One accent, one neutral ramp, no rainbow

@@ -160,6 +160,7 @@ dependencies = [
  "kinema-doc",
  "kinema-text",
  "kinema-time",
+ "kinema-type",
  "serde_json",
 ]
 
@@ -174,6 +175,7 @@ dependencies = [
  "kinema-raster",
  "kinema-text",
  "kinema-time",
+ "kinema-type",
  "serde_json",
 ]
 
@@ -224,6 +226,13 @@ name = "kinema-time"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "kinema-type"
+version = "0.1.0"
+dependencies = [
+ "kinema-text",
 ]
 
 [[package]]
