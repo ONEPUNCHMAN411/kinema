@@ -119,18 +119,22 @@ fn capabilities() -> Value {
             {"name": "eval", "summary": "evaluate one expression against the document", "args": ["<expr>", "--at <seconds>", "--project <dir>"]},
             {"name": "apply", "summary": "apply typed ops, returning their inverses", "args": ["--ops <file|->", "--expect-version <n>", "--dry-run"]},
             {"name": "render", "summary": "render one frame to PNG", "args": ["--frame <n>", "-o <file.png>", "--scale <f>", "--comp <id>"]},
-            {"name": "check", "summary": "run craft detectors", "args": ["--comp <id>", "--frame <n>"]},
+            {"name": "check", "summary": "run craft detectors", "args": ["--comp <id>", "--frame <n>", "--fix", "--max-steps <n>"]},
             {"name": "credits", "summary": "licence roll-up and release gate", "args": []},
             {"name": "log", "summary": "the op journal", "args": []}
         ],
         "ops": kinema_doc::ops::op_schema(),
         "checks": [
-            {"code": "TYPE-FAKE", "severity": "error", "detects": "synthesised italic/bold/small caps, unbundled family"},
-            {"code": "READ", "severity": "error", "detects": "text under its contrast target against the ground it sits on"},
-            {"code": "PALETTE", "severity": "warn", "detects": "more than one accent hue"},
-            {"code": "STAGGER", "severity": "warn", "detects": "more than 70% of layers entering on one frame"}
+            {"code": "TYPE-FAKE", "severity": "error", "detects": "synthesised italic/bold/small caps, unbundled family", "fix": true},
+            {"code": "READ", "severity": "error", "detects": "text under its contrast target against the ground it sits on", "fix": true},
+            {"code": "CHROMA", "severity": "warn", "detects": "saturated text under 32 px on a saturated ground", "fix": true},
+            {"code": "PALETTE", "severity": "warn", "detects": "more than one accent hue", "fix": true},
+            {"code": "EASE-FLAT", "severity": "warn", "detects": "linear or symmetric easing on moves over 200 ms or 2% of frame", "fix": true},
+            {"code": "HOLD-NONE", "severity": "warn", "detects": "no still moment in over three seconds", "fix": false},
+            {"code": "STAGGER", "severity": "warn", "detects": "more than 70% of layers entering on one frame", "fix": true}
         ],
-        "checks_pending": ["EASE-FLAT", "HOLD-NONE", "SHUTTER", "CUT-TIMING", "JUMPCUT", "CHROMA", "BANDING", "LOUD"],
+        "checks_advisory": {"HOLD-NONE": "the remedy is which beat to hold; the hint names it, the engine will not pick"},
+        "checks_pending": ["SHUTTER", "CUT-TIMING", "JUMPCUT", "BANDING", "LOUD"],
         "layer_kinds": ["solid", "text", "shape"],
         "layer_kinds_pending": ["image", "comp", "adjustment"],
         "props": ["value", "kf", "expr", "link", "graph"],
@@ -286,7 +290,7 @@ fn cmd_new(argv: &[String]) -> R {
         "next": [
             "kin render --project <dir> --frame 0 -o frame0.png",
             "kin apply --project <dir> --ops ops.json",
-            "kin check --project <dir>"
+            "kin check --project <dir> --fix"
         ]
     }))
 }
@@ -542,9 +546,46 @@ fn cmd_render(argv: &[String]) -> R {
 
 fn cmd_check(argv: &[String]) -> R {
     let project = Project::open(argv)?;
-    let doc = project.load()?;
+    let mut doc = project.load()?;
     let comp = get(argv, "--comp").unwrap_or("main").to_string();
     let frame = get(argv, "--frame").and_then(|s| s.parse::<u32>().ok());
+
+    // Fixes are computed against one snapshot, so a batch of them can fight: the remedy
+    // for CHROMA is not the remedy for READ. The fixpoint belongs to the checks crate.
+    let mut fixes = Vec::new();
+    let mut conflict = Value::Null;
+    if has(argv, "--fix") {
+        let max: usize = get(argv, "--max-steps")
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|_| usage("--max-steps expects an integer"))?
+            .unwrap_or(20);
+        let report = checks::fixpoint(&doc, &comp, frame, max).map_err(|e| doc_err(&e))?;
+        for step in &report.steps {
+            project.append_journal(&json!({
+                "seq": step.version,
+                "at": now(),
+                "actor": actor(),
+                "op": step.op,
+                "reason": format!("fix for {}", step.code),
+                "doc_after": deps::hash_doc(&report.doc),
+            }))?;
+            fixes.push(json!({
+                "code": step.code,
+                "layer": step.layer,
+                "op": step.op,
+                "version": step.version,
+            }));
+        }
+        if let Some(message) = &report.conflict {
+            conflict = json!(message);
+        }
+        if !report.steps.is_empty() {
+            project.save(&report.doc)?;
+            doc = report.doc;
+        }
+    }
+
     let found = checks::run(&doc, &comp, frame);
     let mut counts = serde_json::Map::new();
     for d in &found {
@@ -561,6 +602,8 @@ fn cmd_check(argv: &[String]) -> R {
         "errors": errors,
         "warnings": warnings,
         "counts": counts,
+        "fixed": if has(argv, "--fix") { json!(fixes) } else { Value::Null },
+        "fix_conflict": conflict,
         "defects": found.iter().map(|d| d.to_json()).collect::<Vec<_>>(),
         "note": if found.is_empty() { Value::Null } else { json!("every defect carries a fix_op you can apply with `kin apply`") },
     }))

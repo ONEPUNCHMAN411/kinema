@@ -53,9 +53,12 @@ are the only declared faces, and `TYPE-FAKE` says so when a document asks for ot
 Not built yet: GPU raster, media decode, encode, audio, assets, capture, templates, MCP.
 Each returns a typed `not-implemented` error with a hint rather than pretending.
 
-Detectors live in this build: `TYPE-FAKE`, `READ`, `PALETTE` and `STAGGER`. The rest of
-the suite is specified with its thresholds in `docs/PLAN.md` and lands with the features
-it measures.
+Detectors live in this build: `TYPE-FAKE`, `READ`, `CHROMA`, `PALETTE`, `EASE-FLAT`,
+`HOLD-NONE` and `STAGGER`. All but `HOLD-NONE` ship a `fix_op`, and `kin check --fix`
+applies them to a fixpoint: remedies are measured against one snapshot, so CHROMA's
+remedy and READ's can disagree, and only re-measuring after each step settles it. The
+remaining detectors are specified with their thresholds in `docs/PLAN.md` and land with
+the features they measure.
 
 ![The starter project rendered at frame 30](docs/first-still.png)
 
@@ -74,6 +77,7 @@ kin probe --project demo --at 1.0    # evaluated layer state at a time
 kin eval 'sin(t * 2) * 40' --at 0.5  # one expression, on its own
 kin render --project demo --frame 30 -o demo/f30.png
 kin check --project demo         # craft defects with fix_op remedies
+kin check --project demo --fix   # apply them until nothing fixable is left
 kin credits --project demo       # licence summary and release gate
 kin log --project demo           # the op journal
 ```

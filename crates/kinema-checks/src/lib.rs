@@ -52,10 +52,217 @@ pub fn run(doc: &Doc, comp: &str, frame: Option<u32>) -> Vec<Defect> {
 
     type_fake(doc, comp, &mut out);
     read(doc, comp, &mut out);
+    chroma(doc, comp, &mut out);
     palette(doc, comp, &mut out);
+    ease_flat(doc, comp, &mut out);
+    hold_none(doc, comp, &mut out);
     stagger(doc, comp, frame, &mut out, frame_of);
     let _ = c;
     out
+}
+
+/// Properties a detector can reason about, with the path segment that addresses them.
+fn animated(layer: &kinema_doc::Layer) -> Vec<(&'static str, &kinema_doc::Prop)> {
+    let mut v: Vec<(&'static str, &kinema_doc::Prop)> = Vec::new();
+    if let Some(p) = &layer.transform.position {
+        v.push(("transform.position", p));
+    }
+    if let Some(p) = &layer.transform.scale {
+        v.push(("transform.scale", p));
+    }
+    if let Some(p) = &layer.transform.rotation {
+        v.push(("transform.rotation", p));
+    }
+    v.push(("opacity", &layer.opacity));
+    v.retain(|(_, p)| p.kf.as_ref().map(|k| k.len() >= 2).unwrap_or(false));
+    v
+}
+
+/// How far a property travels between two keyframe values, in its own units.
+fn travel(field: &str, a: &Value, b: &Value) -> f64 {
+    let pair = |v: &Value| -> Option<[f64; 2]> {
+        let arr = v.as_array()?;
+        Some([arr.first()?.as_f64()?, arr.get(1)?.as_f64()?])
+    };
+    match (pair(a), pair(b)) {
+        (Some(x), Some(y)) if field == "transform.position" => {
+            ((y[0] - x[0]).powi(2) + (y[1] - x[1]).powi(2)).sqrt()
+        }
+        (Some(x), Some(y)) => (y[0] - x[0]).abs().max((y[1] - x[1]).abs()),
+        _ => match (a.as_f64(), b.as_f64()) {
+            (Some(x), Some(y)) => (y - x).abs(),
+            _ => 0.0,
+        },
+    }
+}
+
+/// A curve that accelerates and decelerates by the same amount is the default
+/// interpolation of every slide template. Real motion is biased: quick out, slow in.
+fn is_symmetric(ease: &kinema_doc::Ease) -> bool {
+    let f = |u: f64| ease.apply(u);
+    (f(0.5) - 0.5).abs() < 0.02 && (f(0.25) + f(0.75) - 1.0).abs() < 0.04
+}
+
+fn ease_flat(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
+    let Ok(c) = doc.comp(comp) else { return };
+    for layer in &c.layers {
+        for (field, prop) in animated(layer) {
+            let Some(kfs) = prop.kf.as_ref() else {
+                continue;
+            };
+            let ease = kinema_doc::Ease::parse(prop.ease.as_deref());
+            let flat = matches!(ease, kinema_doc::Ease::Linear);
+            if !flat && !is_symmetric(&ease) {
+                continue;
+            }
+            let threshold = match field {
+                "transform.position" => 0.02 * c.size[0].min(c.size[1]) as f64,
+                "transform.rotation" => 2.0,
+                _ => 0.02,
+            };
+            let mut worst_dur = 0.0f64;
+            let mut worst_travel = 0.0f64;
+            for pair in kfs.windows(2) {
+                let dur = (pair[1].t - pair[0].t).max(0.0);
+                let dist = travel(field, &pair[0].v, &pair[1].v);
+                if dur > 0.2 || dist > threshold {
+                    worst_dur = worst_dur.max(dur);
+                    worst_travel = worst_travel.max(dist);
+                }
+            }
+            if worst_dur == 0.0 && worst_travel == 0.0 {
+                continue;
+            }
+            let mut fixed = serde_json::to_value(prop).unwrap_or_else(|_| json!({}));
+            if let Some(obj) = fixed.as_object_mut() {
+                obj.insert("ease".into(), json!("bezier(.2,.9,.1,1)"));
+            }
+            out.push(Defect {
+                code: "EASE-FLAT",
+                severity: "warn",
+                comp: comp.into(),
+                layer: Some(layer.id.clone()),
+                frame: None,
+                evidence: json!({
+                    "property": field,
+                    "easing": ease.canonical(),
+                    "verdict": if flat { "linear" } else { "symmetric" },
+                    "longest_segment_s": (worst_dur * 1000.0).round() / 1000.0,
+                    "furthest_travel": (worst_travel * 100.0).round() / 100.0,
+                }),
+                hint: "linear and symmetric easing read as mechanical on long or large moves; bias the curve so it leaves fast and settles slowly".into(),
+                fix_op: Some(set_prop(
+                    format!("comp:{comp}/layer:{}/{field}", layer.id),
+                    fixed,
+                    "bias the easing: fast out, slow in",
+                )),
+            });
+        }
+    }
+}
+
+fn moved(a: &[kinema_doc::EvaluatedLayer], b: &[kinema_doc::EvaluatedLayer]) -> bool {
+    if a.len() != b.len() {
+        return true;
+    }
+    for (x, y) in a.iter().zip(b.iter()) {
+        if x.visible != y.visible {
+            return true;
+        }
+        if (x.position[0] - y.position[0]).abs() > 0.5
+            || (x.position[1] - y.position[1]).abs() > 0.5
+            || (x.scale[0] - y.scale[0]).abs() > 0.005
+            || (x.scale[1] - y.scale[1]).abs() > 0.005
+            || (x.rotation - y.rotation).abs() > 0.25
+            || (x.opacity - y.opacity).abs() > 0.005
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Constant motion is the loudest generated tell: nothing ever resolves.
+fn hold_none(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
+    let Ok(c) = doc.comp(comp) else { return };
+    if c.duration < 3.0 {
+        return;
+    }
+    let step = 0.125;
+    let mut prev: Option<Vec<kinema_doc::EvaluatedLayer>> = None;
+    let mut last_still = 0.0f64;
+    let mut worst_gap = 0.0f64;
+    let mut t = 0.0;
+    while t <= c.duration + 1e-9 {
+        let cur = doc.eval_comp(comp, t).ok();
+        if let (Some(a), Some(b)) = (prev.as_ref(), cur.as_ref()) {
+            if moved(a, b) {
+                worst_gap = worst_gap.max(t - last_still);
+            } else {
+                last_still = t;
+            }
+        }
+        prev = cur;
+        t += step;
+    }
+    if worst_gap <= 3.0 {
+        return;
+    }
+    out.push(Defect {
+        code: "HOLD-NONE",
+        severity: "warn",
+        comp: comp.into(),
+        layer: None,
+        frame: None,
+        evidence: json!({
+            "longest_motion_s": (worst_gap * 1000.0).round() / 1000.0,
+            "comp_duration_s": c.duration,
+            "sampled_every_s": step,
+        }),
+        hint: "no still moment in over three seconds: let a composition settle before the next move, by repeating a keyframe value or ending the animation early".into(),
+        // The remedy is a directing choice: which beat to hold is not something an
+        // engine can pick for the agent.
+        fix_op: None,
+    });
+}
+
+/// Saturated small text on a saturated ground is the first thing 4:2:0 destroys.
+fn chroma(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
+    let Ok(c) = doc.comp(comp) else { return };
+    for (i, layer) in c.layers.iter().enumerate() {
+        let Some(text) = &layer.text else { continue };
+        if text.size >= 32.0 || !text.color.is_accent() {
+            continue;
+        }
+        let Ok(ev) = doc.eval_layer(comp, layer, layer.start) else {
+            continue;
+        };
+        let ground = ground_for(doc, comp, i, [ev.position[0], ev.position[1]]);
+        if !ground.is_accent() {
+            continue;
+        }
+        let fixed = ground.ideal_text();
+        out.push(Defect {
+            code: "CHROMA",
+            severity: "warn",
+            comp: comp.into(),
+            layer: Some(layer.id.clone()),
+            frame: None,
+            evidence: json!({
+                "text_size_px": text.size,
+                "text": text.color.to_hex(),
+                "ground": ground.to_hex(),
+                "text_chroma": (text.color.oklab_chroma() * 1000.0).round() / 1000.0,
+                "ground_chroma": (ground.oklab_chroma() * 1000.0).round() / 1000.0,
+            }),
+            hint: "saturated text under 32 px on a saturated ground loses its edges to 4:2:0 chroma subsampling; go neutral or go bigger".into(),
+            fix_op: Some(set_prop(
+                format!("comp:{comp}/layer:{}/text.color", layer.id),
+                json!(fixed.to_hex()),
+                "drop the text to a neutral so chroma subsampling cannot smear it",
+            )),
+        });
+    }
 }
 
 fn type_fake(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
@@ -304,6 +511,81 @@ where
     });
 }
 
+pub struct FixStep {
+    pub code: &'static str,
+    pub layer: Option<String>,
+    pub op: kinema_doc::Op,
+    pub version: u64,
+}
+
+pub struct FixReport {
+    pub doc: Doc,
+    pub steps: Vec<FixStep>,
+    /// Set when two remedies disagree and the document starts cycling.
+    pub conflict: Option<String>,
+    pub remaining: Vec<Defect>,
+}
+
+/// Apply remedies until nothing fixable is left.
+///
+/// Fix ops are computed against one snapshot, so CHROMA's remedy and READ's remedy can
+/// contradict each other. Applying them as a batch is therefore wrong: the document has
+/// to be re-measured after each step, which is exactly what this loop does. One step per
+/// defect keeps the trail auditable, and a state that repeats means two remedies fight.
+pub fn fixpoint(
+    doc: &Doc,
+    comp: &str,
+    frame: Option<u32>,
+    max: usize,
+) -> Result<FixReport, kinema_doc::DocError> {
+    let mut cur = doc.clone();
+    let mut steps = Vec::new();
+    let mut conflict = None;
+    let mut seen = vec![state_key(&cur)];
+    for _ in 0..max {
+        let found = run(&cur, comp, frame);
+        let Some(defect) = found.iter().find(|d| d.fix_op.is_some()) else {
+            break;
+        };
+        let Some(fix) = defect.fix_op.clone() else {
+            break;
+        };
+        let op: kinema_doc::Op = match serde_json::from_value(fix) {
+            Ok(op) => op,
+            Err(e) => {
+                conflict = Some(format!("fix_op for {} does not parse: {e}", defect.code));
+                break;
+            }
+        };
+        cur.apply(&op)?;
+        steps.push(FixStep {
+            code: defect.code,
+            layer: defect.layer.clone(),
+            op,
+            version: cur.version,
+        });
+        let key = state_key(&cur);
+        if seen.contains(&key) {
+            conflict = Some(format!(
+                "the document returned to an earlier state while fixing {}: two remedies disagree",
+                defect.code
+            ));
+            break;
+        }
+        seen.push(key);
+    }
+    Ok(FixReport {
+        remaining: run(&cur, comp, frame),
+        doc: cur,
+        steps,
+        conflict,
+    })
+}
+
+fn state_key(doc: &Doc) -> String {
+    serde_json::to_string(doc).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,6 +646,117 @@ mod tests {
             !defects(&doc2).iter().any(|d| d.code == "READ"),
             "fix should clear the defect"
         );
+    }
+
+    #[test]
+    fn linear_easing_on_a_long_move_is_caught_and_fixed() {
+        let mut doc = Doc::starter();
+        doc.comps.get_mut("main").unwrap().layers[2]
+            .transform
+            .position
+            .as_mut()
+            .unwrap()
+            .ease = Some("linear".into());
+        let found = defects(&doc);
+        let d = found
+            .iter()
+            .find(|d| d.code == "EASE-FLAT")
+            .expect("EASE-FLAT");
+        assert_eq!(d.evidence["verdict"], "linear");
+        let op: kinema_doc::Op = serde_json::from_value(d.fix_op.clone().unwrap()).unwrap();
+        doc.apply(&op).unwrap();
+        assert!(
+            !defects(&doc).iter().any(|d| d.code == "EASE-FLAT"),
+            "the biased curve should clear it"
+        );
+    }
+
+    #[test]
+    fn symmetric_beziers_are_caught() {
+        let mut doc = Doc::starter();
+        doc.comps.get_mut("main").unwrap().layers[2]
+            .transform
+            .position
+            .as_mut()
+            .unwrap()
+            .ease = Some("bezier(.42,0,.58,1)".into());
+        let found = defects(&doc);
+        let d = found
+            .iter()
+            .find(|d| d.code == "EASE-FLAT")
+            .expect("EASE-FLAT");
+        assert_eq!(d.evidence["verdict"], "symmetric");
+    }
+
+    #[test]
+    fn constant_motion_is_caught_and_is_advisory() {
+        let mut doc = Doc::starter();
+        doc.comps.get_mut("main").unwrap().layers[2]
+            .transform
+            .position = Some(serde_json::from_str(r#"{"expr":"[160 + t * 120, 600]"}"#).unwrap());
+        let found = defects(&doc);
+        let d = found
+            .iter()
+            .find(|d| d.code == "HOLD-NONE")
+            .expect("HOLD-NONE");
+        assert!(
+            d.fix_op.is_none(),
+            "choosing a beat to hold is a directing call"
+        );
+    }
+
+    #[test]
+    fn saturated_small_text_on_saturated_ground_is_caught() {
+        let mut doc = Doc::starter();
+        let layers = &mut doc.comps.get_mut("main").unwrap().layers;
+        layers[0].solid = Some(kinema_doc::Solid {
+            color: Rgba::opaque(0x40, 0x10, 0xa0),
+        });
+        let text = layers[2].text.as_mut().unwrap();
+        text.size = 24.0;
+        text.color = Rgba::opaque(0xff, 0x00, 0x60);
+        let found = defects(&doc);
+        assert!(found.iter().any(|d| d.code == "CHROMA"), "{found:?}");
+    }
+
+    #[test]
+    fn fixpoint_converges_on_a_document_full_of_tells() {
+        let mut doc = Doc::starter();
+        let layers = &mut doc.comps.get_mut("main").unwrap().layers;
+        layers[0].solid = Some(kinema_doc::Solid {
+            color: Rgba::opaque(0x40, 0x10, 0xa0),
+        });
+        layers[2].transform.position.as_mut().unwrap().ease = Some("linear".into());
+        let text = layers[2].text.as_mut().unwrap();
+        text.size = 24.0;
+        text.color = Rgba::opaque(0xff, 0x00, 0x60);
+        assert!(!defects(&doc).is_empty());
+
+        let report = fixpoint(&doc, "main", None, 20).unwrap();
+        assert!(report.conflict.is_none(), "{:?}", report.conflict);
+        assert!(
+            report.steps.len() >= 3,
+            "expected several steps, got {}",
+            report.steps.len()
+        );
+        assert!(
+            report.remaining.iter().all(|d| d.fix_op.is_none()),
+            "left fixable: {:?}",
+            report.remaining.iter().map(|d| d.code).collect::<Vec<_>>()
+        );
+        assert!(
+            !report.remaining.iter().any(|d| d.severity == "error"),
+            "errors remain: {:?}",
+            report.remaining.iter().map(|d| d.code).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn fixpoint_leaves_a_clean_document_alone() {
+        let doc = Doc::starter();
+        let report = fixpoint(&doc, "main", None, 20).unwrap();
+        assert!(report.steps.is_empty());
+        assert!(report.remaining.is_empty());
     }
 
     #[test]
