@@ -955,6 +955,24 @@ impl Doc {
                         out.push(format!("layer `{}` shape gradient: {e}", l.id));
                     }
                 }
+                if let Some(m) = &l.mattes {
+                    if m.alpha.is_some() && m.luma.is_some() {
+                        out.push(format!(
+                            "layer `{}` declares both an alpha and a luma matte",
+                            l.id
+                        ));
+                    }
+                    for src in [m.alpha.as_ref(), m.luma.as_ref()].into_iter().flatten() {
+                        if src == &l.id {
+                            out.push(format!("layer `{}` mattes itself", l.id));
+                        } else if !c.layers.iter().any(|o| &o.id == src) {
+                            out.push(format!(
+                                "layer `{}` mattes `{src}`, which is not in comp `{id}`",
+                                l.id
+                            ));
+                        }
+                    }
+                }
             }
         }
         out

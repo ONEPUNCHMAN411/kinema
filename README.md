@@ -102,6 +102,13 @@ in linear light and optionally dithered. A ramp that holds one colour for more t
 is a `BANDING` defect whose `fix_op` turns dithering on — measured, not assumed: the demo
 ramp that trips it holds one colour for 92 px of a 1920 px span.
 
+A layer can be cut to another layer through `set-mattes`, by alpha or by luma, in canvas
+space so the matte layer's own transform decides where it cuts. The layer doing the cutting
+is a source and does not draw itself; `kin render` says so in `matte_sources`, because a
+layer disappearing quietly is the failure this feature invites. The same trap bites from the
+other side: a matte whose source ink does not reach the layer produces an empty region, not
+an error, so `kin probe` both bboxes before wondering where the picture went.
+
 Detectors live in this build: `TYPE-FAKE`, `TYPE-SCALE`, `LOOK-DRIFT`, `BANDING`, `READ`,
 `CHROMA`, `PALETTE`, `EASE-FLAT`, `SHUTTER`, `HOLD-NONE` and `STAGGER`. All but `HOLD-NONE` ship a `fix_op`, and `kin check --fix`
 applies them to a fixpoint: remedies are measured against one snapshot, so CHROMA's

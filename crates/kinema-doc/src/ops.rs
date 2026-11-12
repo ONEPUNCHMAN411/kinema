@@ -3,7 +3,7 @@
 //! Every mutation is an `Op` that can be inverted, so the journal gives undo, diff and
 //! provenance for free. A path looks like `comp:main/layer:title/transform.position`.
 
-use crate::model::{Asset, Gradient, Layer, Look};
+use crate::model::{Asset, Gradient, Layer, Look, Matte};
 use crate::{Doc, DocError, Prop};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -62,6 +62,15 @@ pub enum Op {
         #[serde(default)]
         reason: String,
     },
+    /// Point a layer at another as its alpha or luma matte, or clear it with `"mattes": null`.
+    SetMattes {
+        comp: String,
+        layer: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mattes: Option<Matte>,
+        #[serde(default)]
+        reason: String,
+    },
     /// Replace the document's look, or clear it with `"look": null`.
     SetLook {
         #[serde(default)]
@@ -81,6 +90,7 @@ impl Op {
             | Op::SetAsset { reason, .. }
             | Op::RemoveAsset { reason, .. }
             | Op::SetLook { reason, .. }
+            | Op::SetMattes { reason, .. }
             | Op::SetGradient { reason, .. } => reason,
         }
     }
@@ -95,6 +105,7 @@ impl Op {
             Op::RemoveAsset { .. } => "remove-asset",
             Op::SetLook { .. } => "set-look",
             Op::SetGradient { .. } => "set-gradient",
+            Op::SetMattes { .. } => "set-mattes",
         }
     }
 }
@@ -244,6 +255,28 @@ fn inverse_of(before: &Doc, op: &Op) -> Result<Option<Op>, DocError> {
             })),
             None => Ok(None),
         },
+        Op::SetMattes {
+            comp,
+            layer,
+            reason,
+            ..
+        } => {
+            let c = before.comp(comp)?;
+            let l = c
+                .layers
+                .iter()
+                .find(|l| &l.id == layer)
+                .ok_or_else(|| DocError::NotFound {
+                    path: format!("comp:{comp}/layer:{layer}"),
+                    hint: "check the layer id".to_string(),
+                })?;
+            Ok(Some(Op::SetMattes {
+                comp: comp.clone(),
+                layer: layer.clone(),
+                mattes: l.mattes.clone(),
+                reason: format!("undo of: {reason}"),
+            }))
+        }
         Op::SetLook { reason, .. } => Ok(Some(Op::SetLook {
             look: before.look.clone(),
             reason: format!("undo of: {reason}"),
@@ -362,6 +395,26 @@ impl Doc {
             Op::SetLook { look, .. } => {
                 self.look = look.clone();
             }
+            Op::SetMattes {
+                comp,
+                layer,
+                mattes,
+                ..
+            } => {
+                let c = self.comps.get_mut(comp).ok_or_else(|| DocError::NotFound {
+                    path: format!("comp:{comp}"),
+                    hint: "check the comp id".to_string(),
+                })?;
+                let l = c
+                    .layers
+                    .iter_mut()
+                    .find(|l| &l.id == layer)
+                    .ok_or_else(|| DocError::NotFound {
+                        path: format!("comp:{comp}/layer:{layer}"),
+                        hint: "check the layer id".to_string(),
+                    })?;
+                l.mattes = mattes.clone();
+            }
             Op::SetGradient {
                 comp,
                 layer,
@@ -440,7 +493,10 @@ pub fn op_schema() -> Value {
              "examples": [{"op": "set-look", "look": {"accent": "#4c8fff", "scheme": "dark", "scale": {"base": 16, "ratio": 1.25}}, "reason": "one accent for the whole project"}]},
             {"type": "object", "required": ["op", "comp", "layer", "on"],
              "properties": {"op": {"const": "set-gradient"}, "comp": {"type": "string"}, "layer": {"type": "string"}, "on": {"enum": ["solid", "shape"]}, "gradient": {"type": ["object", "null"]}, "reason": {"type": "string"}},
-             "examples": [{"op": "set-gradient", "comp": "main", "layer": "bg", "on": "solid", "gradient": {"kind": "linear", "angle": 90, "dither": true, "stops": [{"at": 0, "color": "#0a0e18"}, {"at": 1, "color": "#1b2a4a"}]}, "reason": "a ground with depth"}]}
+             "examples": [{"op": "set-gradient", "comp": "main", "layer": "bg", "on": "solid", "gradient": {"kind": "linear", "angle": 90, "dither": true, "stops": [{"at": 0, "color": "#0a0e18"}, {"at": 1, "color": "#1b2a4a"}]}, "reason": "a ground with depth"}]},
+            {"type": "object", "required": ["op", "comp", "layer"],
+             "properties": {"op": {"const": "set-mattes"}, "comp": {"type": "string"}, "layer": {"type": "string"}, "mattes": {"type": ["object", "null"]}, "reason": {"type": "string"}},
+             "examples": [{"op": "set-mattes", "comp": "main", "layer": "title", "mattes": {"alpha": "accent"}, "reason": "cut the title to the rule"}]}
         ]
     })
 }
@@ -591,6 +647,50 @@ mod tests {
         assert_eq!(look.scale.base, 14.0);
         doc.apply(&res.inverse.unwrap()).unwrap();
         assert_eq!(doc.look, before, "undo restores the previous look");
+    }
+
+    #[test]
+    fn a_matte_can_be_set_and_undone() {
+        let mut doc = Doc::starter();
+        let op: Op = serde_json::from_value(json!({
+            "op": "set-mattes", "comp": "main", "layer": "title",
+            "mattes": {"alpha": "accent"}, "reason": "test"
+        }))
+        .unwrap();
+        let res = doc.apply(&op).unwrap();
+        let title = doc.comps["main"]
+            .layers
+            .iter()
+            .find(|l| l.id == "title")
+            .unwrap();
+        assert_eq!(
+            title.mattes.as_ref().unwrap().alpha.as_deref(),
+            Some("accent")
+        );
+        assert!(doc.validate().is_empty(), "{:?}", doc.validate());
+        doc.apply(&res.inverse.unwrap()).unwrap();
+        let title = doc.comps["main"]
+            .layers
+            .iter()
+            .find(|l| l.id == "title")
+            .unwrap();
+        assert!(title.mattes.is_none(), "undo removes the matte");
+    }
+
+    #[test]
+    fn a_matte_on_a_missing_layer_is_reported() {
+        let mut doc = Doc::starter();
+        let op: Op = serde_json::from_value(json!({
+            "op": "set-mattes", "comp": "main", "layer": "title",
+            "mattes": {"luma": "nope"}, "reason": "test"
+        }))
+        .unwrap();
+        doc.apply(&op).unwrap();
+        let problems = doc.validate();
+        assert!(
+            problems.iter().any(|p| p.contains("nope")),
+            "a matte on a layer that is not there must be reported: {problems:?}"
+        );
     }
 
     #[test]

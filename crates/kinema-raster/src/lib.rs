@@ -202,6 +202,39 @@ impl Canvas {
         }
     }
 
+    /// Keep a canvas only where `matte` has coverage.
+    ///
+    /// An alpha matte reads the matte layer's alpha; a luma matte reads its brightness
+    /// (Rec. 709 on the encoded values, which is what a luma matte means to a compositor)
+    /// and still respects the matte layer's own alpha.
+    pub fn mask_by(&mut self, matte: &Canvas, luma: bool) {
+        for (i, px) in self.data.chunks_mut(4).enumerate() {
+            let m = &matte.data[i * 4..i * 4 + 4];
+            let a = m[3] as f64 / 255.0;
+            let cover = if luma {
+                (0.2126 * m[0] as f64 + 0.7152 * m[1] as f64 + 0.0722 * m[2] as f64) / 255.0 * a
+            } else {
+                a
+            };
+            px[3] = (px[3] as f64 * cover).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    /// Composite another canvas of the same size at full coverage.
+    pub fn composite_from(&mut self, src: &Canvas, mode: Blend) {
+        let w = self.width.min(src.width);
+        let h = self.height.min(src.height);
+        for py in 0..h {
+            for px in 0..w {
+                let s = src.get(px, py);
+                if s.a == 0 {
+                    continue;
+                }
+                self.composite(px, py, s, 1.0, mode);
+            }
+        }
+    }
+
     /// A rectangle filled with a ramp.
     #[allow(clippy::too_many_arguments)]
     pub fn fill_rect_gradient(
@@ -479,9 +512,17 @@ fn shaded(g: &kinema_doc::Gradient, t: f64, px: u32, py: u32) -> Rgba {
 
 #[derive(Debug)]
 pub enum RenderError {
-    Unsupported { kind: String, layer: String },
+    Unsupported {
+        kind: String,
+        layer: String,
+    },
     Encode(String),
     Doc(String),
+    Matte {
+        layer: String,
+        source: String,
+        why: String,
+    },
 }
 
 impl RenderError {
@@ -510,6 +551,15 @@ impl RenderError {
                 "fix_op": null,
                 "doc": "docs/PLAN.md#document",
             }),
+            RenderError::Matte { layer, source, why } => json!({
+                "code": "matte",
+                "message": why,
+                "hint": "a matte names another layer in the same comp, by id",
+                "fix_op": { "op": "set-mattes", "comp": null, "layer": layer, "mattes": null, "reason": "drop the matte that cannot be resolved" },
+                "doc": "docs/PLAN.md#layers",
+                "layer": layer,
+                "source": source,
+            }),
         }
     }
 }
@@ -519,6 +569,7 @@ pub struct RenderedLayer {
     pub id: String,
     pub kind: &'static str,
     pub opacity: f64,
+    pub matte: Option<String>,
 }
 
 #[derive(Debug)]
@@ -531,6 +582,9 @@ pub struct RenderOutput {
     pub png: Vec<u8>,
     pub layers: Vec<RenderedLayer>,
     pub skipped: Vec<String>,
+    /// Layers that were used as someone's matte, and so did not draw themselves. Reported
+    /// because a layer vanishing quietly is the failure mode mattes are prone to.
+    pub matte_sources: Vec<String>,
     /// Subframe samples averaged into this frame; 1 means no motion blur.
     pub samples: u32,
 }
@@ -551,85 +605,170 @@ fn draw_at(
     let mut drawn = Vec::new();
     let mut skipped = BTreeSet::new();
 
+    // A layer named as someone's matte is a source, not a picture: it is composed into the
+    // layer that refers to it instead of drawing itself.
+    let sources = matte_sources(c);
+
     for layer in &c.layers {
         if !(t >= layer.start && t < layer.start + layer.duration) {
+            continue;
+        }
+        if sources.contains(&layer.id) {
             continue;
         }
         let ev = doc
             .eval_layer(comp, layer, t)
             .map_err(|e| RenderError::Doc(e.to_string()))?;
         let alpha = ev.opacity;
-        let [bx, by, bw, bh] = ev.bbox;
-        let (bx, by, bw, bh) = (bx * scale, by * scale, bw * scale, bh * scale);
-        match layer.kind {
-            LayerKind::Solid => {
-                let (color, gradient) = match &layer.solid {
-                    Some(s) => (s.color, s.gradient.as_ref()),
-                    None => (Rgba::BLACK, None),
-                };
-                let (w, h) = (canvas.width as f64, canvas.height as f64);
-                match gradient {
-                    Some(g) => canvas.fill_rect_gradient(0.0, 0.0, w, h, g, alpha, layer.blend),
-                    None => canvas.fill_rect(0.0, 0.0, w, h, color, alpha, layer.blend),
+
+        // A matte is built in canvas space, so the matte layer's own transform decides
+        // where it cuts: that is the whole point of using one.
+        if let Some(m) = &layer.mattes {
+            let (source, luma) = match (&m.luma, &m.alpha) {
+                (Some(id), _) => (id, true),
+                (None, Some(id)) => (id, false),
+                (None, None) => {
+                    return Err(RenderError::Matte {
+                        layer: layer.id.clone(),
+                        source: String::new(),
+                        why: format!("layer `{}` declares a matte with no source", layer.id),
+                    })
                 }
-            }
-            LayerKind::Shape => {
-                let Some(shape) = &layer.shape else {
-                    skipped.insert(layer.id.clone());
-                    continue;
-                };
-                match (&shape.gradient, shape.kind) {
-                    (Some(g), kinema_doc::ShapeKind::Ellipse) => {
-                        canvas.fill_ellipse_gradient(bx, by, bw, bh, g, alpha, layer.blend)
-                    }
-                    (Some(g), _) => {
-                        canvas.fill_rect_gradient(bx, by, bw, bh, g, alpha, layer.blend)
-                    }
-                    (None, kinema_doc::ShapeKind::Ellipse) => {
-                        canvas.fill_ellipse(bx, by, bw, bh, shape.color, alpha, layer.blend)
-                    }
-                    (None, _) => canvas.fill_rect(bx, by, bw, bh, shape.color, alpha, layer.blend),
-                }
-            }
-            LayerKind::Text => {
-                let Some(text) = &layer.text else {
-                    skipped.insert(layer.id.clone());
-                    continue;
-                };
-                canvas.draw_text_block(&TextDraw {
-                    text: &text.string,
-                    box_x: bx,
-                    box_y: by,
-                    box_w: bw,
-                    font: &text.font,
-                    weight: text.weight,
-                    italic: text.italic,
-                    size: text.size * scale,
-                    tracking: text.tracking * scale,
-                    line_height: text.line_height,
-                    align: text.align,
-                    color: text.color,
-                    alpha,
-                    mode: layer.blend,
-                    anim: text.anim.as_ref(),
-                    time: t - layer.start,
-                });
-            }
-            other => {
-                return Err(RenderError::Unsupported {
-                    kind: other.as_str().to_string(),
+            };
+            let Some(src) = c.layers.iter().find(|l| &l.id == source) else {
+                return Err(RenderError::Matte {
                     layer: layer.id.clone(),
-                })
+                    source: source.clone(),
+                    why: format!(
+                        "layer `{}` mattes `{source}`, which is not in comp `{comp}`",
+                        layer.id
+                    ),
+                });
+            };
+            let mut own = Canvas::new(width, height);
+            if !draw_layer(&mut own, layer, &ev, scale, t, Blend::Normal)? {
+                skipped.insert(layer.id.clone());
+                continue;
             }
+            let mut mask = Canvas::new(width, height);
+            if t >= src.start && t < src.start + src.duration {
+                let sev = doc
+                    .eval_layer(comp, src, t)
+                    .map_err(|e| RenderError::Doc(e.to_string()))?;
+                draw_layer(&mut mask, src, &sev, scale, t, Blend::Normal)?;
+            }
+            own.mask_by(&mask, luma);
+            canvas.composite_from(&own, layer.blend);
+            drawn.push(RenderedLayer {
+                id: layer.id.clone(),
+                kind: layer.kind.as_str(),
+                opacity: alpha,
+                matte: Some(format!(
+                    "{} through `{source}`",
+                    if luma { "luma" } else { "alpha" }
+                )),
+            });
+            continue;
+        }
+
+        if !draw_layer(&mut canvas, layer, &ev, scale, t, layer.blend)? {
+            skipped.insert(layer.id.clone());
+            continue;
         }
         drawn.push(RenderedLayer {
             id: layer.id.clone(),
             kind: layer.kind.as_str(),
             opacity: alpha,
+            matte: None,
         });
     }
 
     Ok((canvas, drawn, skipped.into_iter().collect()))
+}
+
+/// Every layer id that some layer in `c` uses as a matte.
+fn matte_sources(c: &kinema_doc::model::Comp) -> BTreeSet<String> {
+    let mut set = BTreeSet::new();
+    for layer in &c.layers {
+        if let Some(m) = &layer.mattes {
+            for src in [m.alpha.as_ref(), m.luma.as_ref()].into_iter().flatten() {
+                set.insert(src.clone());
+            }
+        }
+    }
+    set
+}
+
+/// Draw one layer's content into a canvas. `false` means the layer had nothing to draw.
+fn draw_layer(
+    canvas: &mut Canvas,
+    layer: &kinema_doc::Layer,
+    ev: &kinema_doc::EvaluatedLayer,
+    scale: f64,
+    t: f64,
+    mode: Blend,
+) -> Result<bool, RenderError> {
+    let alpha = ev.opacity;
+    let [bx, by, bw, bh] = ev.bbox;
+    let (bx, by, bw, bh) = (bx * scale, by * scale, bw * scale, bh * scale);
+    match layer.kind {
+        LayerKind::Solid => {
+            let (color, gradient) = match &layer.solid {
+                Some(s) => (s.color, s.gradient.as_ref()),
+                None => (Rgba::BLACK, None),
+            };
+            let (w, h) = (canvas.width as f64, canvas.height as f64);
+            match gradient {
+                Some(g) => canvas.fill_rect_gradient(0.0, 0.0, w, h, g, alpha, mode),
+                None => canvas.fill_rect(0.0, 0.0, w, h, color, alpha, mode),
+            }
+        }
+        LayerKind::Shape => {
+            let Some(shape) = &layer.shape else {
+                return Ok(false);
+            };
+            match (&shape.gradient, shape.kind) {
+                (Some(g), kinema_doc::ShapeKind::Ellipse) => {
+                    canvas.fill_ellipse_gradient(bx, by, bw, bh, g, alpha, mode)
+                }
+                (Some(g), _) => canvas.fill_rect_gradient(bx, by, bw, bh, g, alpha, mode),
+                (None, kinema_doc::ShapeKind::Ellipse) => {
+                    canvas.fill_ellipse(bx, by, bw, bh, shape.color, alpha, mode)
+                }
+                (None, _) => canvas.fill_rect(bx, by, bw, bh, shape.color, alpha, mode),
+            }
+        }
+        LayerKind::Text => {
+            let Some(text) = &layer.text else {
+                return Ok(false);
+            };
+            canvas.draw_text_block(&TextDraw {
+                text: &text.string,
+                box_x: bx,
+                box_y: by,
+                box_w: bw,
+                font: &text.font,
+                weight: text.weight,
+                italic: text.italic,
+                size: text.size * scale,
+                tracking: text.tracking * scale,
+                line_height: text.line_height,
+                align: text.align,
+                color: text.color,
+                alpha,
+                mode,
+                anim: text.anim.as_ref(),
+                time: t - layer.start,
+            });
+        }
+        other => {
+            return Err(RenderError::Unsupported {
+                kind: other.as_str().to_string(),
+                layer: layer.id.clone(),
+            })
+        }
+    }
+    Ok(true)
 }
 
 /// Accumulate in premultiplied colour: averaging straight alpha would darken edges.
@@ -715,6 +854,7 @@ pub fn render_frame(
         png,
         layers: drawn,
         skipped,
+        matte_sources: matte_sources(c).into_iter().collect(),
         samples,
     })
 }
@@ -723,6 +863,121 @@ pub fn render_frame(
 mod tests {
     use super::*;
     use kinema_doc::Doc;
+
+    fn base_layer(id: &str, kind: LayerKind) -> kinema_doc::model::Layer {
+        kinema_doc::model::Layer {
+            id: id.into(),
+            kind,
+            start: 0.0,
+            duration: 4.0,
+            transform: kinema_doc::Transform::default(),
+            opacity: kinema_doc::Prop::number(1.0),
+            blend: Blend::Normal,
+            solid: None,
+            text: None,
+            shape: None,
+            mattes: None,
+            modifiers: vec![],
+            source: None,
+        }
+    }
+
+    fn solid(id: &str, color: Rgba) -> kinema_doc::model::Layer {
+        let mut l = base_layer(id, LayerKind::Solid);
+        l.solid = Some(kinema_doc::Solid {
+            color,
+            gradient: None,
+        });
+        l
+    }
+
+    fn rect(id: &str, size: [f64; 2], color: Rgba) -> kinema_doc::model::Layer {
+        let mut l = base_layer(id, LayerKind::Shape);
+        l.shape = Some(kinema_doc::Shape {
+            kind: kinema_doc::ShapeKind::Rect,
+            size,
+            color,
+            radius: 0.0,
+            gradient: None,
+        });
+        l
+    }
+
+    fn ellipse(id: &str, size: [f64; 2], color: Rgba) -> kinema_doc::model::Layer {
+        let mut l = base_layer(id, LayerKind::Shape);
+        l.shape = Some(kinema_doc::Shape {
+            kind: kinema_doc::ShapeKind::Ellipse,
+            size,
+            color,
+            radius: 0.0,
+            gradient: None,
+        });
+        l
+    }
+
+    fn comp_of(layers: Vec<kinema_doc::model::Layer>) -> Doc {
+        let mut doc = Doc::starter();
+        let c = doc.comps.get_mut("main").unwrap();
+        c.size = [320, 180];
+        c.duration = 4.0;
+        c.shutter = 0.0;
+        c.layers = layers;
+        doc
+    }
+
+    #[test]
+    fn an_alpha_matte_cuts_the_layer_and_hides_its_source() {
+        // A small bar, so the frame shows what the matte did rather than covering it.
+        let mut fill = rect("fill", [40.0, 20.0], Rgba::opaque(0, 0, 0));
+        fill.mattes = Some(kinema_doc::Matte {
+            alpha: Some("mask".into()),
+            luma: None,
+        });
+        let doc = comp_of(vec![
+            solid("bg", Rgba::opaque(255, 255, 255)),
+            ellipse("mask", [100.0, 80.0], Rgba::opaque(0, 200, 0)),
+            fill,
+        ]);
+        let out = render_frame(&doc, "main", 0, 1.0).unwrap();
+        let px = |x: u32, y: u32| -> [u8; 4] {
+            let o = ((y * out.width + x) * 4) as usize;
+            [
+                out.pixels[o],
+                out.pixels[o + 1],
+                out.pixels[o + 2],
+                out.pixels[o + 3],
+            ]
+        };
+        assert!(px(160, 90)[0] < 10, "inside the matte is the layer");
+        // Inside the matte but outside the layer: the mask layer must not have drawn itself.
+        assert!(
+            px(160, 55)[0] > 200,
+            "the matte source stays out of the frame, got {:?}",
+            px(160, 55)
+        );
+        assert!(px(4, 4)[0] > 200, "outside the matte is the background");
+    }
+
+    #[test]
+    fn a_luma_matte_keeps_half_the_coverage() {
+        let mut fill = solid("fill", Rgba::opaque(0, 0, 0));
+        fill.mattes = Some(kinema_doc::Matte {
+            alpha: None,
+            luma: Some("mask".into()),
+        });
+        let doc = comp_of(vec![
+            solid("bg", Rgba::opaque(255, 255, 255)),
+            solid("mask", Rgba::opaque(128, 128, 128)),
+            fill,
+        ]);
+        let out = render_frame(&doc, "main", 0, 1.0).unwrap();
+        let o = ((90 * out.width + 160) * 4) as usize;
+        let value = out.pixels[o];
+        assert!(
+            (118..=138).contains(&value),
+            "a mid-grey luma matte halves the coverage over white, got {value}"
+        );
+    }
 
     #[test]
     fn a_frame_renders_and_encodes() {
