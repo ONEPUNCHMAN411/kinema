@@ -1,0 +1,87 @@
+# Kinema
+
+Headless motion engine for AI agents. CLI `kin`, crates `kinema-*`.
+
+There is no human UI and won't be one. Every surface is a tool call, a schema, or a
+checkable result.
+
+## Design
+
+Code-first engines render a *projection of code*; After Effects renders a *document*.
+Agents write code well but can't inspect it, and patch documents well. So Kinema keeps
+one typed document, offers code frontends, and evaluates it in one deterministic pass.
+
+- Calls are stateless: everything reconstructs from the document plus the op journal.
+- Writes are CAS-versioned (`--expect-version`) so several agents can work on one project.
+- Output is compact JSON, with `--fields` for projection.
+- Errors are `{code, message, hint, fix_op, doc}` and `fix_op` is directly applicable.
+- Every op carries a `reason`, so a critic agent can audit another agent's work.
+
+## What it takes from where
+
+| Source | Taken |
+| --- | --- |
+| RAEA (FSL, docs only) | browserless GPU frames, NV12 → hardware encode, dependency-tracked incremental bake, timeline as queryable data |
+| HyperFrames (Apache-2.0) | declarative timing, seek-don't-play determinism, nested comps, typed ops + undo, the skill contract |
+| Remotion | composition registry, input props, frame-pure render, chunked resumable render, parallel encode |
+| After Effects | precomps, bezier easing, expressions, mattes, adjustment layers, time remap, motion blur, shape ops, text animators, Essential Properties |
+| Blender | ID datablocks with linking, depsgraph, node graphs as data, modifier stack, AOV/EXR/OCIO |
+
+The craft layer — type, colour, motion, audio and the detector suite — is what makes
+output look professional rather than generated. It is specified in `docs/PLAN.md`.
+
+## Status: P0
+
+Built:
+
+- `kinema-time` — rational frame rate, 90 kHz tick timeline, timecode.
+- `kinema-doc` — the document, properties (`value | kf | expr | link | graph`), typed ops
+  with inverses, and an append-only journal.
+- `kinema-deps` — canonical JSON and content hashes for documents, layers and frames.
+- `kinema-raster` — CPU RGBA canvas, blend modes, bitmap text, PNG out.
+- `kinema-checks` — the first craft detectors with `fix_op` remedies.
+- `kinema-cli` — `kin` itself.
+
+The document supports `solid`, `text` and `shape` layers; properties support constants,
+keyframes and links. `expr` and `graph` return a typed `not-implemented` with a hint that
+names the phase. Text is drawn with a built-in 5 x 7 bitmap face — `Inter` at 400 and 700
+are the only declared faces, and `TYPE-FAKE` says so when a document asks for others.
+
+Not built yet: GPU raster, media decode, encode, audio, assets, capture, templates, MCP.
+Each returns a typed `not-implemented` error with a hint rather than pretending.
+
+Detectors live in this build: `TYPE-FAKE`, `READ`, `PALETTE` and `STAGGER`. The rest of
+the suite is specified with its thresholds in `docs/PLAN.md` and lands with the features
+it measures.
+
+## Usage
+
+```sh
+kin new demo                     # scaffold a project
+kin capabilities                 # what this build can do
+kin schema                       # JSON Schema for the document
+kin apply --project demo --ops ops.json --expect-version 0
+kin probe --project demo --at 1.0    # evaluated layer state at a time
+kin render --project demo --frame 30 -o demo/f30.png
+kin check --project demo         # craft defects with fix_op remedies
+kin credits --project demo       # licence summary and release gate
+kin log --project demo           # the op journal
+```
+
+Every verb prints JSON. Errors carry `code`, `message`, `hint`, `fix_op` and `doc`:
+
+```json
+{"ok":false,"error":{"code":"version-conflict","message":"document is at version 4, you expected 0","hint":"rebase: reload with `kin probe`, re-read the value, and retry with the current version","fix_op":null,"doc":"docs/PLAN.md#contract"}}
+```
+
+## Build
+
+```sh
+cargo build --release
+cargo test
+```
+
+## Licence
+
+MIT OR Apache-2.0. No GPL code is linked; x264/x265 stay behind an opt-in feature, and
+Blender is only ever invoked as a subprocess.
