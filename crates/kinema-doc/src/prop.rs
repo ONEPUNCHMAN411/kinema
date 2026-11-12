@@ -121,9 +121,7 @@ impl Prop {
             return target.eval(t, doc, depth + 1);
         }
         if let Some(src) = &self.expr {
-            return Err(EvalError::NoExprHost {
-                source: src.clone(),
-            });
+            return eval_source(doc, src, t, depth + 1);
         }
         if let Some(id) = &self.graph {
             return Err(EvalError::NoGraphHost { id: id.clone() });
@@ -393,10 +391,89 @@ fn lerp_value(a: &Value, b: &Value, u: f64) -> Value {
 pub enum EvalError {
     Empty,
     Recursion,
-    TypeMismatch { want: &'static str },
-    NoExprHost { source: String },
-    NoGraphHost { id: String },
-    BadLink { path: String, why: String },
+    TypeMismatch {
+        want: &'static str,
+    },
+    Expr {
+        source: String,
+        message: String,
+        at: usize,
+        hint: String,
+    },
+    NoGraphHost {
+        id: String,
+    },
+    BadLink {
+        path: String,
+        why: String,
+    },
+}
+
+/// Evaluate a standalone expression against a document at one time.
+///
+/// `link()` paths resolve through the same property evaluator, so an expression can read
+/// anything a property can, and the depth guard applies to the whole chain.
+pub fn eval_source(doc: &Doc, src: &str, t: f64, depth: u8) -> Result<Value, EvalError> {
+    if depth > 8 {
+        return Err(EvalError::Recursion);
+    }
+    let (width, height, duration) = doc
+        .comps
+        .get("main")
+        .map(|c| (c.size[0] as f64, c.size[1] as f64, c.duration))
+        .unwrap_or((0.0, 0.0, 0.0));
+    let resolve = |path: &str| -> Result<kinema_expr::Val, String> {
+        let raw = doc.value_at(path).map_err(|e| e.to_string())?;
+        let target: Prop =
+            serde_json::from_value(raw.clone()).unwrap_or_else(|_| Prop::constant(raw));
+        let out = target.eval(t, doc, depth).map_err(|e| e.to_string())?;
+        to_expr_val(&out)
+            .ok_or_else(|| format!("`{path}` is not a number, boolean or list of numbers"))
+    };
+    let ctx = kinema_expr::Ctx {
+        t,
+        frame: doc.fps.ticks_to_frame(kinema_time::seconds_to_ticks(t)),
+        fps: doc.fps.as_f64(),
+        width,
+        height,
+        duration,
+        resolve: &resolve,
+    };
+    let val = kinema_expr::eval(src, &ctx).map_err(|e| EvalError::Expr {
+        source: src.to_string(),
+        message: e.to_string(),
+        at: e.at,
+        hint: if e.hint.is_empty() {
+            "test the expression on its own with `kin eval '<expr>' --at 1.0`".to_string()
+        } else {
+            e.hint
+        },
+    })?;
+    Ok(from_expr_val(&val.to_json()))
+}
+
+fn to_expr_val(v: &Value) -> Option<kinema_expr::Val> {
+    match v {
+        Value::Number(n) => n.as_f64().map(kinema_expr::Val::Num),
+        Value::Bool(b) => Some(kinema_expr::Val::Bool(*b)),
+        Value::String(s) => Some(kinema_expr::Val::Str(s.clone())),
+        Value::Array(items) => items
+            .iter()
+            .map(|i| i.as_f64())
+            .collect::<Option<Vec<f64>>>()
+            .map(kinema_expr::Val::Arr),
+        _ => None,
+    }
+}
+
+fn from_expr_val(v: &kinema_expr::serde_like::Value) -> Value {
+    use kinema_expr::serde_like::Value as E;
+    match v {
+        E::Num(n) => serde_json::json!(n),
+        E::Bool(b) => serde_json::json!(b),
+        E::Str(s) => serde_json::json!(s),
+        E::Arr(items) => Value::Array(items.iter().map(from_expr_val).collect()),
+    }
 }
 
 impl fmt::Display for EvalError {
@@ -405,8 +482,10 @@ impl fmt::Display for EvalError {
             EvalError::Empty => write!(f, "property has no value, keyframes, expression or link"),
             EvalError::Recursion => write!(f, "link chain deeper than 8; it probably loops"),
             EvalError::TypeMismatch { want } => write!(f, "property is not a {want}"),
-            EvalError::NoExprHost { source } => {
-                write!(f, "no expression host in this build: `{source}`")
+            EvalError::Expr {
+                source, message, ..
+            } => {
+                write!(f, "expression `{source}` failed: {message}")
             }
             EvalError::NoGraphHost { id } => write!(f, "no node host in this build: `{id}`"),
             EvalError::BadLink { path, why } => write!(f, "link `{path}` does not resolve: {why}"),
@@ -419,14 +498,26 @@ impl std::error::Error for EvalError {}
 impl EvalError {
     pub fn to_json(&self) -> Value {
         match self {
-            EvalError::NoExprHost { source } => serde_json::json!({
-                "code": "not-implemented",
-                "message": "the expression host is not in this build",
-                "hint": "replace the expression with keyframes, or wait for the `expr` crate",
-                "fix_op": { "op": "set-prop", "path": "", "value": { "kf": [[0.0, 0]] }, "reason": "swap expression for keyframes" },
-                "doc": "docs/PLAN.md#contract",
-                "source": source,
-            }),
+            EvalError::Expr {
+                source,
+                message,
+                at,
+                hint,
+            } => {
+                let mut json = serde_json::json!({
+                    "code": "expr-failed",
+                    "message": message,
+                    "hint": hint,
+                    "fix_op": null,
+                    "doc": "docs/PLAN.md#properties",
+                    "source": source,
+                });
+                // Only parse errors know where they failed; never invent an offset.
+                if *at > 0 {
+                    json["at"] = serde_json::json!(at);
+                }
+                json
+            }
             EvalError::NoGraphHost { id } => serde_json::json!({
                 "code": "not-implemented",
                 "message": "the node-graph host is not in this build",
@@ -502,11 +593,36 @@ mod tests {
     }
 
     #[test]
-    fn expressions_report_not_implemented() {
-        let p: Prop = serde_json::from_str(r#"{"expr":"clamp(t,0,1)"}"#).unwrap();
-        let err = p.eval(0.5, &Doc::empty(), 0).unwrap_err();
-        assert!(matches!(err, EvalError::NoExprHost { .. }));
-        assert_eq!(err.to_json()["code"], "not-implemented");
+    fn expressions_evaluate_in_context() {
+        let doc = Doc::starter();
+        let p: Prop = serde_json::from_str(r#"{"expr":"t * 10 + frame"}"#).unwrap();
+        // Frame 45 at 1.5 s on a 30 fps document.
+        assert_eq!(p.eval_f64(1.5, &doc).unwrap(), 60.0);
+
+        let pair: Prop = serde_json::from_str(r#"{"expr":"[width / 2, height - 60]"}"#).unwrap();
+        assert_eq!(pair.eval_vec2(0.0, &doc).unwrap(), [960.0, 1020.0]);
+    }
+
+    #[test]
+    fn expressions_can_link_properties() {
+        let doc = Doc::starter();
+        let p: Prop =
+            serde_json::from_str(r#"{"expr":"link(\"comp:main/layer:bg/opacity\") * 3"}"#).unwrap();
+        assert_eq!(p.eval_f64(0.0, &doc).unwrap(), 3.0);
+    }
+
+    #[test]
+    fn expression_failures_are_typed() {
+        let doc = Doc::starter();
+        let p: Prop = serde_json::from_str(r#"{"expr":"1 / 0"}"#).unwrap();
+        let err = p.eval(0.0, &doc, 0).unwrap_err();
+        assert!(matches!(err, EvalError::Expr { .. }));
+        let json = err.to_json();
+        assert_eq!(json["code"], "expr-failed");
+        assert!(
+            json["hint"].as_str().unwrap().contains("kin eval"),
+            "{json}"
+        );
     }
 
     #[test]

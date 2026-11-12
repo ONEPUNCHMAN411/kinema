@@ -35,6 +35,9 @@ output look professional rather than generated. It is specified in `docs/PLAN.md
 Built:
 
 - `kinema-time` — rational frame rate, 90 kHz tick timeline, timecode.
+- `kinema-expr` — the expression language: no loops, no assignment, no I/O, bounded
+  source, depth and steps, with `t`, `frame`, easing, springs, deterministic noise and
+  `link()` into any other property.
 - `kinema-doc` — the document, properties (`value | kf | expr | link | graph`), typed ops
   with inverses, and an append-only journal.
 - `kinema-deps` — canonical JSON and content hashes for documents, layers and frames.
@@ -43,8 +46,8 @@ Built:
 - `kinema-cli` — `kin` itself.
 
 The document supports `solid`, `text` and `shape` layers; properties support constants,
-keyframes and links. `expr` and `graph` return a typed `not-implemented` with a hint that
-names the phase. Text is drawn with a built-in 5 x 7 bitmap face — `Inter` at 400 and 700
+keyframes, links and expressions. `graph` returns a typed `not-implemented` with a hint
+that names the phase. Text is drawn with a built-in 5 x 7 bitmap face — `Inter` at 400 and 700
 are the only declared faces, and `TYPE-FAKE` says so when a document asks for others.
 
 Not built yet: GPU raster, media decode, encode, audio, assets, capture, templates, MCP.
@@ -68,6 +71,7 @@ kin capabilities                 # what this build can do
 kin schema                       # JSON Schema for the document
 kin apply --project demo --ops ops.json --expect-version 0
 kin probe --project demo --at 1.0    # evaluated layer state at a time
+kin eval 'sin(t * 2) * 40' --at 0.5  # one expression, on its own
 kin render --project demo --frame 30 -o demo/f30.png
 kin check --project demo         # craft defects with fix_op remedies
 kin credits --project demo       # licence summary and release gate

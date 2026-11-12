@@ -121,6 +121,7 @@ dependencies = [
  "kinema-checks",
  "kinema-deps",
  "kinema-doc",
+ "kinema-expr",
  "kinema-raster",
  "kinema-time",
  "serde_json",
@@ -139,10 +140,15 @@ dependencies = [
 name = "kinema-doc"
 version = "0.1.0"
 dependencies = [
+ "kinema-expr",
  "kinema-time",
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "kinema-expr"
+version = "0.1.0"
 
 [[package]]
 name = "kinema-raster"

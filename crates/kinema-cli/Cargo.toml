@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 kinema-time.workspace = true
+kinema-expr.workspace = true
 kinema-doc.workspace = true
 kinema-deps.workspace = true
 kinema-raster.workspace = true

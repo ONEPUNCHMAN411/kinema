@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/kinema-time",
+    "crates/kinema-expr",
     "crates/kinema-doc",
     "crates/kinema-deps",
     "crates/kinema-raster",
@@ -18,6 +19,7 @@ rust-version = "1.80"
 
 [workspace.dependencies]
 kinema-time = { path = "crates/kinema-time" }
+kinema-expr = { path = "crates/kinema-expr" }
 kinema-doc = { path = "crates/kinema-doc" }
 kinema-deps = { path = "crates/kinema-deps" }
 kinema-raster = { path = "crates/kinema-raster" }

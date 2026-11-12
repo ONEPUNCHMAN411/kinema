@@ -52,6 +52,7 @@ fn dispatch(argv: &[String]) -> R {
         }
         "new" => cmd_new(argv),
         "probe" => cmd_probe(argv),
+        "eval" => cmd_eval(argv),
         "apply" => cmd_apply(argv),
         "render" => cmd_render(argv),
         "check" => cmd_check(argv),
@@ -115,6 +116,7 @@ fn capabilities() -> Value {
             {"name": "schema", "summary": "JSON Schema for the document"},
             {"name": "new", "summary": "create a project: doc.json plus a journal", "args": ["<dir>", "--force"]},
             {"name": "probe", "summary": "resolved layers at a time", "args": ["--at <seconds>", "--comp <id>", "--layer <id>"]},
+            {"name": "eval", "summary": "evaluate one expression against the document", "args": ["<expr>", "--at <seconds>", "--project <dir>"]},
             {"name": "apply", "summary": "apply typed ops, returning their inverses", "args": ["--ops <file|->", "--expect-version <n>", "--dry-run"]},
             {"name": "render", "summary": "render one frame to PNG", "args": ["--frame <n>", "-o <file.png>", "--scale <f>", "--comp <id>"]},
             {"name": "check", "summary": "run craft detectors", "args": ["--comp <id>", "--frame <n>"]},
@@ -132,7 +134,12 @@ fn capabilities() -> Value {
         "layer_kinds": ["solid", "text", "shape"],
         "layer_kinds_pending": ["image", "comp", "adjustment"],
         "props": ["value", "kf", "expr", "link", "graph"],
-        "props_working": ["value", "kf", "link"],
+        "props_working": ["value", "kf", "link", "expr"],
+        "expressions": {
+            "constants": ["t", "frame", "fps", "width", "height", "duration", "PI", "TAU", "E"],
+            "functions": kinema_expr::FUNCTIONS.iter().map(|(n, d)| json!({"name": n, "usage": d})).collect::<Vec<_>>(),
+            "bounded": ["no loops, no assignment, no I/O", "4096 byte source", "32 deep", "20000 steps"],
+        },
         "fonts": checks::BUNDLED_FONTS,
         "weights": checks::BUNDLED_WEIGHTS,
         "path_syntax": "comp:main/layer:title/transform.position",
@@ -335,6 +342,37 @@ fn cmd_probe(argv: &[String]) -> R {
             "frames": doc.frame_count(&comp_id).map_err(|e| doc_err(&e))?,
         },
         "layers": layers,
+    }))
+}
+
+fn cmd_eval(argv: &[String]) -> R {
+    let pos = positionals(argv);
+    let src = get(argv, "--expr")
+        .map(str::to_string)
+        .or_else(|| pos.get(1).cloned());
+    let Some(src) = src else {
+        return Err(usage(
+            "pass an expression: kin eval 'clamp(t, 0, 1)' --at 1.5",
+        ));
+    };
+    let doc = if get(argv, "--project").is_some() {
+        Project::open(argv)?.load()?
+    } else {
+        Doc::starter()
+    };
+    let t: f64 = get(argv, "--at")
+        .map(|s| s.parse())
+        .transpose()
+        .map_err(|_| usage("--at expects seconds, e.g. --at 1.5"))?
+        .unwrap_or(0.0);
+    let value = kinema_doc::prop::eval_source(&doc, &src, t, 0)
+        .map_err(|e| json!({ "ok": false, "error": e.to_json() }))?;
+    Ok(json!({
+        "ok": true,
+        "expr": src,
+        "at": t,
+        "frame": doc.fps.ticks_to_frame(kinema_time::seconds_to_ticks(t)),
+        "value": value,
     }))
 }
 
