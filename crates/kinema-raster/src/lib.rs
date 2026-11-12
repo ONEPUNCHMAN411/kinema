@@ -162,6 +162,51 @@ impl Canvas {
         }
     }
 
+    /// Draw a block of lines inside a box, honouring alignment.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text_block(
+        &mut self,
+        text: &str,
+        box_x: f64,
+        box_y: f64,
+        box_w: f64,
+        size: f64,
+        tracking: f64,
+        line_height: f64,
+        align: kinema_doc::Align,
+        color: Rgba,
+        alpha: f64,
+        mode: Blend,
+    ) {
+        let unit = size / font::GLYPH_H as f64;
+        for (i, line) in text.split('\n').enumerate() {
+            let n = line.chars().count() as f64;
+            let line_w = if n == 0.0 {
+                0.0
+            } else {
+                (n * (kinema_doc::Text::ADVANCE * unit + tracking)
+                    - tracking
+                    - (kinema_doc::Text::ADVANCE - kinema_doc::Text::GLYPH_W) * unit)
+                    .max(0.0)
+            };
+            let x = match align {
+                kinema_doc::Align::Left => box_x,
+                kinema_doc::Align::Center => box_x + (box_w - line_w) / 2.0,
+                kinema_doc::Align::Right => box_x + box_w - line_w,
+            };
+            self.draw_text(
+                line,
+                x,
+                box_y + i as f64 * size * line_height,
+                size,
+                tracking,
+                color,
+                alpha,
+                mode,
+            );
+        }
+    }
+
     /// Draw with the bitmap face. `y` is the top of the cap box.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_text(
@@ -328,14 +373,16 @@ fn draw_at(
                     skipped.insert(layer.id.clone());
                     continue;
                 };
-                let color = text.color;
-                canvas.draw_text(
+                canvas.draw_text_block(
                     &text.string,
                     bx,
                     by,
+                    bw,
                     text.size * scale,
                     text.tracking * scale,
-                    color,
+                    text.line_height,
+                    text.align,
+                    text.color,
                     alpha,
                     layer.blend,
                 );
@@ -485,6 +532,55 @@ mod tests {
         );
         let inked = canvas.data.chunks(4).filter(|p| p[3] > 0).count();
         assert!(inked > 500, "expected letterforms, got {inked} pixels");
+    }
+
+    #[test]
+    fn two_lines_land_in_two_bands() {
+        let mut canvas = Canvas::new(400, 300);
+        canvas.draw_text_block(
+            "TOP\nBOTTOM",
+            0.0,
+            10.0,
+            400.0,
+            60.0,
+            0.0,
+            1.2,
+            kinema_doc::Align::Center,
+            Rgba::WHITE,
+            1.0,
+            Blend::Normal,
+        );
+        let row_has_ink = |y: usize| (0..400).any(|x| canvas.get(x as u32, y as u32).a > 0);
+        assert!(row_has_ink(20), "first line should be near the top");
+        assert!(row_has_ink(90), "second line should be a leading lower");
+        assert!(!row_has_ink(200), "the block should not reach the bottom");
+    }
+
+    #[test]
+    fn alignment_moves_the_line_inside_its_box() {
+        let ink_x = |align: kinema_doc::Align| -> i32 {
+            let mut canvas = Canvas::new(400, 100);
+            canvas.draw_text_block(
+                "HI",
+                0.0,
+                0.0,
+                400.0,
+                60.0,
+                0.0,
+                1.2,
+                align,
+                Rgba::WHITE,
+                1.0,
+                Blend::Normal,
+            );
+            (0..400)
+                .find(|x| canvas.get(*x as u32, 10).a > 0)
+                .unwrap_or(999)
+        };
+        let left = ink_x(kinema_doc::Align::Left);
+        let center = ink_x(kinema_doc::Align::Center);
+        let right = ink_x(kinema_doc::Align::Right);
+        assert!(left < center && center < right, "{left} {center} {right}");
     }
 
     #[test]

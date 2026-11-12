@@ -89,7 +89,9 @@ pub fn doc_schema() -> Value {
                             "color": {"$ref": "#/$defs/colour"},
                             "weight": {"type": "integer"},
                             "italic": {"type": "boolean"},
-                            "tracking": {"type": "number"}
+                            "tracking": {"type": "number"},
+                            "align": {"enum": ["left", "center", "right"]},
+                            "line_height": {"type": "number", "exclusiveMinimum": 0, "description": "multiple of the size between baselines"}
                         }
                     },
                     "shape": {

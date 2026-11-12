@@ -168,8 +168,18 @@ pub struct Shape {
     pub radius: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Align {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Text {
+    /// Lines are separated by `\n`; there is no automatic wrapping yet.
     pub string: String,
     pub size: f64,
     #[serde(default = "default_font")]
@@ -181,6 +191,15 @@ pub struct Text {
     pub italic: bool,
     #[serde(default)]
     pub tracking: f64,
+    #[serde(default)]
+    pub align: Align,
+    /// Multiple of the type size between baselines. Ignored for a single line.
+    #[serde(default = "default_line_height")]
+    pub line_height: f64,
+}
+
+fn default_line_height() -> f64 {
+    1.2
 }
 
 fn default_font() -> String {
@@ -206,13 +225,33 @@ impl Text {
         Self::ADVANCE * self.unit() + self.tracking
     }
 
-    pub fn metrics(&self) -> [f64; 2] {
-        let n = self.string.chars().count().max(1) as f64;
+    pub fn lines(&self) -> Vec<&str> {
+        self.string.split('\n').collect()
+    }
+
+    /// Advance width of one line, in pixels.
+    pub fn line_width(&self, line: &str) -> f64 {
+        let n = line.chars().count() as f64;
+        if n == 0.0 {
+            return 0.0;
+        }
         let unit = self.unit();
         let width = n * (Self::ADVANCE * unit + self.tracking)
-            - self.tracking.max(0.0)
+            - self.tracking
             - (Self::ADVANCE - Self::GLYPH_W) * unit;
-        [width.max(0.0), self.size]
+        width.max(0.0)
+    }
+
+    /// `[width, height]` of the text block. One line is exactly the type size tall, so
+    /// documents that never use a newline keep their geometry.
+    pub fn metrics(&self) -> [f64; 2] {
+        let lines = self.lines();
+        let width = lines
+            .iter()
+            .map(|l| self.line_width(l))
+            .fold(0.0f64, f64::max);
+        let height = self.size * (1.0 + (lines.len() as f64 - 1.0) * self.line_height);
+        [width, height.max(0.0)]
     }
 }
 
@@ -405,6 +444,8 @@ impl Doc {
                     weight: 700,
                     italic: false,
                     tracking: 0.0,
+                    align: Align::Center,
+                    line_height: default_line_height(),
                 }),
                 shape: None,
                 mattes: None,
@@ -615,12 +656,40 @@ mod tests {
             weight: 400,
             italic: false,
             tracking: 0.0,
+            align: Align::Center,
+            line_height: 1.2,
         };
         let small = t.metrics();
         t.size = 140.0;
         let large = t.metrics();
         assert!((large[0] / small[0] - 2.0).abs() < 1e-9);
         assert!((large[1] - 140.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn multiline_metrics_stack_lines() {
+        let mut t = Text {
+            string: "ONE\nTWO TWO".into(),
+            size: 50.0,
+            font: "Inter".into(),
+            color: Rgba::WHITE,
+            weight: 400,
+            italic: false,
+            tracking: 0.0,
+            align: Align::Left,
+            line_height: 1.5,
+        };
+        let two = t.metrics();
+        // Two lines at 1.5 leading: 50 + 75.
+        assert!((two[1] - 125.0).abs() < 1e-9, "{}", two[1]);
+        assert_eq!(t.lines().len(), 2);
+        // The widest line sets the block width.
+        assert!((two[0] - t.line_width("TWO TWO")).abs() < 1e-9);
+        t.string = "ONE".into();
+        assert!(
+            (t.metrics()[1] - 50.0).abs() < 1e-9,
+            "a single line is one size tall, so old documents keep their geometry"
+        );
     }
 
     #[test]

@@ -8,8 +8,8 @@ pub mod schema;
 
 pub use color::Rgba;
 pub use model::{
-    Asset, Blend, Comp, Doc, EvaluatedLayer, Layer, LayerKind, Licence, Matte, Modifier, Shape,
-    ShapeKind, Solid, Text, Transform,
+    Align, Asset, Blend, Comp, Doc, EvaluatedLayer, Layer, LayerKind, Licence, Matte, Modifier,
+    Shape, ShapeKind, Solid, Text, Transform,
 };
 pub use ops::{AppliedResult, Op};
 pub use prop::{Ease, EvalError, Keyframe, Prop};
