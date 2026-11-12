@@ -1,0 +1,9 @@
+* text=auto eol=lf
+
+*.png binary
+*.webp binary
+*.exr binary
+*.mp4 binary
+*.wav binary
+
+Cargo.lock merge=binary
