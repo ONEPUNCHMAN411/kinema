@@ -870,6 +870,15 @@ impl Doc {
             LayerKind::Solid => {
                 size = [c.size[0] as f64, c.size[1] as f64];
             }
+            LayerKind::Comp => {
+                // A nested comp takes its own frame size, so its bbox is that size.
+                let inner = layer
+                    .source
+                    .as_ref()
+                    .and_then(|s| self.comps.get(s))
+                    .unwrap_or(c);
+                size = [inner.size[0] as f64, inner.size[1] as f64];
+            }
             _ => {}
         }
         let w = size[0] * scale[0].abs();
@@ -945,6 +954,19 @@ impl Doc {
                 if l.kind == LayerKind::Shape && l.shape.is_none() {
                     out.push(format!("shape layer `{}` has no shape block", l.id));
                 }
+                if l.kind == LayerKind::Comp {
+                    match &l.source {
+                        None => out.push(format!("comp layer `{}` has no source comp", l.id)),
+                        Some(src) if src == id => {
+                            out.push(format!("comp layer `{}` contains its own comp", l.id))
+                        }
+                        Some(src) if !self.comps.contains_key(src) => out.push(format!(
+                            "comp layer `{}` points at `{src}`, which is not a comp",
+                            l.id
+                        )),
+                        Some(_) => {}
+                    }
+                }
                 if let Some(g) = l.solid.as_ref().and_then(|s| s.gradient.as_ref()) {
                     if let Some(e) = g.validate() {
                         out.push(format!("layer `{}` solid gradient: {e}", l.id));
@@ -986,6 +1008,22 @@ impl Doc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_comp_layer_needs_a_real_source() {
+        let mut doc = Doc::starter();
+        let c = doc.comps.get_mut("main").unwrap();
+        let mut l = c.layers[0].clone();
+        l.id = "nested".into();
+        l.kind = LayerKind::Comp;
+        l.source = Some("nope".into());
+        c.layers.push(l);
+        let problems = doc.validate();
+        assert!(
+            problems.iter().any(|p| p.contains("nope")),
+            "a comp layer pointing nowhere must be reported: {problems:?}"
+        );
+    }
 
     #[test]
     fn starter_round_trips() {

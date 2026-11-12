@@ -220,6 +220,29 @@ impl Canvas {
         }
     }
 
+    /// Composite `src` onto this canvas with its top-left at (dx, dy), in canvas pixels.
+    pub fn composite_at(&mut self, src: &Canvas, dx: f64, dy: f64, alpha: f64, mode: Blend) {
+        let ox = dx.round() as i64;
+        let oy = dy.round() as i64;
+        for sy in 0..src.height {
+            let ty = oy + sy as i64;
+            if ty < 0 || ty >= self.height as i64 {
+                continue;
+            }
+            for sx in 0..src.width {
+                let tx = ox + sx as i64;
+                if tx < 0 || tx >= self.width as i64 {
+                    continue;
+                }
+                let s = src.get(sx, sy);
+                if s.a == 0 {
+                    continue;
+                }
+                self.composite(tx as u32, ty as u32, s, alpha, mode);
+            }
+        }
+    }
+
     /// Composite another canvas of the same size at full coverage.
     pub fn composite_from(&mut self, src: &Canvas, mode: Blend) {
         let w = self.width.min(src.width);
@@ -523,6 +546,12 @@ pub enum RenderError {
         source: String,
         why: String,
     },
+    Comp {
+        layer: String,
+        source: String,
+        why: String,
+        fix_op: Option<Value>,
+    },
 }
 
 impl RenderError {
@@ -550,6 +579,20 @@ impl RenderError {
                 "hint": "run `kin check` to see structural problems",
                 "fix_op": null,
                 "doc": "docs/PLAN.md#document",
+            }),
+            RenderError::Comp {
+                layer,
+                source,
+                why,
+                fix_op,
+            } => json!({
+                "code": "comp",
+                "message": why,
+                "hint": "a comp layer names another comp in `source`; nested comps nest one level at a time and none may contain itself",
+                "fix_op": fix_op,
+                "doc": "docs/PLAN.md#layers",
+                "layer": layer,
+                "source": source,
             }),
             RenderError::Matte { layer, source, why } => json!({
                 "code": "matte",
@@ -595,7 +638,17 @@ fn draw_at(
     comp: &str,
     t: f64,
     scale: f64,
+    stack: &[String],
+    depth: usize,
 ) -> Result<(Canvas, Vec<RenderedLayer>, Vec<String>), RenderError> {
+    if depth > 8 {
+        return Err(RenderError::Comp {
+            layer: String::new(),
+            source: comp.to_string(),
+            why: format!("comps nest more than 8 deep at `{comp}`"),
+            fix_op: None,
+        });
+    }
     let c = doc
         .comp(comp)
         .map_err(|e| RenderError::Doc(e.to_string()))?;
@@ -646,7 +699,18 @@ fn draw_at(
                 });
             };
             let mut own = Canvas::new(width, height);
-            if !draw_layer(&mut own, layer, &ev, scale, t, Blend::Normal)? {
+            if !draw_layer(
+                &mut own,
+                doc,
+                comp,
+                layer,
+                &ev,
+                scale,
+                t,
+                Blend::Normal,
+                stack,
+                depth,
+            )? {
                 skipped.insert(layer.id.clone());
                 continue;
             }
@@ -655,7 +719,18 @@ fn draw_at(
                 let sev = doc
                     .eval_layer(comp, src, t)
                     .map_err(|e| RenderError::Doc(e.to_string()))?;
-                draw_layer(&mut mask, src, &sev, scale, t, Blend::Normal)?;
+                draw_layer(
+                    &mut mask,
+                    doc,
+                    comp,
+                    src,
+                    &sev,
+                    scale,
+                    t,
+                    Blend::Normal,
+                    stack,
+                    depth,
+                )?;
             }
             own.mask_by(&mask, luma);
             canvas.composite_from(&own, layer.blend);
@@ -671,7 +746,18 @@ fn draw_at(
             continue;
         }
 
-        if !draw_layer(&mut canvas, layer, &ev, scale, t, layer.blend)? {
+        if !draw_layer(
+            &mut canvas,
+            doc,
+            comp,
+            layer,
+            &ev,
+            scale,
+            t,
+            layer.blend,
+            stack,
+            depth,
+        )? {
             skipped.insert(layer.id.clone());
             continue;
         }
@@ -700,13 +786,18 @@ fn matte_sources(c: &kinema_doc::model::Comp) -> BTreeSet<String> {
 }
 
 /// Draw one layer's content into a canvas. `false` means the layer had nothing to draw.
+#[allow(clippy::too_many_arguments)]
 fn draw_layer(
     canvas: &mut Canvas,
+    doc: &Doc,
+    parent: &str,
     layer: &kinema_doc::Layer,
     ev: &kinema_doc::EvaluatedLayer,
     scale: f64,
     t: f64,
     mode: Blend,
+    stack: &[String],
+    depth: usize,
 ) -> Result<bool, RenderError> {
     let alpha = ev.opacity;
     let [bx, by, bw, bh] = ev.bbox;
@@ -760,6 +851,46 @@ fn draw_layer(
                 anim: text.anim.as_ref(),
                 time: t - layer.start,
             });
+        }
+        LayerKind::Comp => {
+            // A nested comp is drawn on its own clock and placed by its bbox: the
+            // layer's start is the nested comp's zero, and its position is where the
+            // nested frame sits. Shutter stays with the comp being rendered.
+            let Some(src) = &layer.source else {
+                return Err(RenderError::Comp {
+                    layer: layer.id.clone(),
+                    source: String::new(),
+                    why: format!("layer `{}` is a comp layer with no source", layer.id),
+                    fix_op: None,
+                });
+            };
+            if src == parent || stack.iter().any(|s| s == src) {
+                return Err(RenderError::Comp {
+                    layer: layer.id.clone(),
+                    source: src.clone(),
+                    why: format!("comp `{src}` contains itself through layer `{}`", layer.id),
+                    fix_op: Some(
+                        json!({ "op": "delete-layer", "comp": parent, "layer": layer.id, "reason": "break the cycle" }),
+                    ),
+                });
+            }
+            if !doc.comps.contains_key(src) {
+                return Err(RenderError::Comp {
+                    layer: layer.id.clone(),
+                    source: src.clone(),
+                    why: format!(
+                        "layer `{}` points at `{src}`, which is not a comp",
+                        layer.id
+                    ),
+                    fix_op: Some(
+                        json!({ "op": "delete-layer", "comp": parent, "layer": layer.id, "reason": "drop a comp layer with nowhere to point" }),
+                    ),
+                });
+            }
+            let mut inner = stack.to_vec();
+            inner.push(parent.to_string());
+            let (nested, _, _) = draw_at(doc, src, t - layer.start, scale, &inner, depth + 1)?;
+            canvas.composite_at(&nested, bx, by, alpha, mode);
         }
         other => {
             return Err(RenderError::Unsupported {
@@ -828,7 +959,7 @@ pub fn render_frame(
         for i in 0..samples {
             let u = i as f64 / (samples - 1) as f64;
             let sub = t - exposure / 2.0 + exposure * u;
-            let (cv, layers, skipped) = draw_at(doc, comp, sub, scale)?;
+            let (cv, layers, skipped) = draw_at(doc, comp, sub, scale, &[], 0)?;
             if seen.is_none() {
                 seen = Some((layers, skipped));
             }
@@ -842,7 +973,7 @@ pub fn render_frame(
             samples,
         )
     } else {
-        let (cv, layers, skipped) = draw_at(doc, comp, t, scale)?;
+        let (cv, layers, skipped) = draw_at(doc, comp, t, scale, &[], 0)?;
         (cv, layers, skipped, 1)
     };
 
@@ -923,6 +1054,42 @@ mod tests {
         c.shutter = 0.0;
         c.layers = layers;
         doc
+    }
+
+    #[test]
+    fn a_comp_layer_draws_the_nested_comp() {
+        let mut doc = comp_of(vec![]);
+        doc.comps.insert(
+            "inner".to_string(),
+            kinema_doc::Comp {
+                size: [100, 100],
+                duration: 4.0,
+                shutter: 0.0,
+                samples: 8,
+                layers: vec![solid("nested", Rgba::opaque(255, 0, 0))],
+            },
+        );
+        let mut nested = base_layer("look", LayerKind::Comp);
+        nested.source = Some("inner".into());
+        doc.comps.get_mut("main").unwrap().layers = vec![nested];
+        let out = render_frame(&doc, "main", 0, 1.0).unwrap();
+        let inside = ((90 * out.width + 160) * 4) as usize;
+        assert_eq!(
+            &out.pixels[inside..inside + 3],
+            &[255, 0, 0],
+            "the nested comp is drawn where the layer sits"
+        );
+        // The nested frame is 100x100 in a 320x180 comp, so the corner stays empty.
+        assert_eq!(out.pixels[3], 0, "nothing outside the nested frame");
+    }
+
+    #[test]
+    fn a_comp_layer_that_contains_itself_is_refused() {
+        let mut looped = base_layer("loop", LayerKind::Comp);
+        looped.source = Some("main".into());
+        let doc = comp_of(vec![looped]);
+        let err = render_frame(&doc, "main", 0, 1.0).unwrap_err();
+        assert_eq!(err.to_json()["code"], "comp", "{}", err.to_json());
     }
 
     #[test]

@@ -109,6 +109,12 @@ layer disappearing quietly is the failure this feature invites. The same trap bi
 other side: a matte whose source ink does not reach the layer produces an empty region, not
 an error, so `kin probe` both bboxes before wondering where the picture went.
 
+A comp layer (`"kind": "comp"`, `"source": "<comp id>"`) draws another comp in its own
+frame: the layer's start is the nested comp's zero, its position is where the nested frame
+sits, and its bbox is the nested comp's size. A comp that contains itself is an error with
+the delete-layer that breaks it, not a stack overflow. Nested comps render without the
+parent's motion blur, because shutter belongs to the comp being rendered.
+
 Detectors live in this build: `TYPE-FAKE`, `TYPE-SCALE`, `LOOK-DRIFT`, `BANDING`, `READ`,
 `CHROMA`, `PALETTE`, `EASE-FLAT`, `SHUTTER`, `HOLD-NONE` and `STAGGER`. All but `HOLD-NONE` ship a `fix_op`, and `kin check --fix`
 applies them to a fixpoint: remedies are measured against one snapshot, so CHROMA's
