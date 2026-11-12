@@ -54,6 +54,12 @@ Detectors live in this build: `TYPE-FAKE`, `READ`, `PALETTE` and `STAGGER`. The 
 the suite is specified with its thresholds in `docs/PLAN.md` and lands with the features
 it measures.
 
+![The starter project rendered at frame 30](docs/first-still.png)
+
+`kin new demo` then `kin render --frame 30`: the CPU tier's first still. The title and the
+rule both carry bezier keyframes, the three entrances are staggered, and `kin check` is
+clean.
+
 ## Usage
 
 ```sh
