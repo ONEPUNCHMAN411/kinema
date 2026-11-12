@@ -54,6 +54,8 @@ pub fn doc_schema() -> Value {
                 "properties": {
                     "size": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "integer", "minimum": 1}},
                     "duration": {"type": "number", "exclusiveMinimum": 0, "description": "seconds"},
+                    "shutter": {"type": "number", "minimum": 0, "maximum": 360, "description": "shutter angle in degrees; 180 is film default, 0 disables motion blur"},
+                    "samples": {"type": "integer", "minimum": 2, "maximum": 64, "description": "subframe samples when shutter > 0"},
                     "layers": {"type": "array", "items": {"$ref": "#/$defs/layer"}}
                 }
             },

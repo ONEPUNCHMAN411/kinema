@@ -269,21 +269,22 @@ pub struct RenderOutput {
     pub png: Vec<u8>,
     pub layers: Vec<RenderedLayer>,
     pub skipped: Vec<String>,
+    /// Subframe samples averaged into this frame; 1 means no motion blur.
+    pub samples: u32,
 }
 
 /// Draw one frame of one comp on the CPU.
-pub fn render_frame(
+fn draw_at(
     doc: &Doc,
     comp: &str,
-    frame: u32,
+    t: f64,
     scale: f64,
-) -> Result<RenderOutput, RenderError> {
+) -> Result<(Canvas, Vec<RenderedLayer>, Vec<String>), RenderError> {
     let c = doc
         .comp(comp)
         .map_err(|e| RenderError::Doc(e.to_string()))?;
     let width = ((c.size[0] as f64) * scale).round().max(1.0) as u32;
     let height = ((c.size[1] as f64) * scale).round().max(1.0) as u32;
-    let t = doc.frame_time(frame);
     let mut canvas = Canvas::new(width, height);
     let mut drawn = Vec::new();
     let mut skipped = BTreeSet::new();
@@ -353,6 +354,84 @@ pub fn render_frame(
         });
     }
 
+    Ok((canvas, drawn, skipped.into_iter().collect()))
+}
+
+/// Accumulate in premultiplied colour: averaging straight alpha would darken edges.
+fn accumulate(acc: &mut [f32], canvas: &Canvas) {
+    for (i, px) in canvas.data.chunks(4).enumerate() {
+        let a = px[3] as f32 / 255.0;
+        let o = i * 4;
+        acc[o] += px[0] as f32 * a;
+        acc[o + 1] += px[1] as f32 * a;
+        acc[o + 2] += px[2] as f32 * a;
+        acc[o + 3] += px[3] as f32;
+    }
+}
+
+fn average(acc: &[f32], width: u32, height: u32, samples: u32) -> Canvas {
+    let k = samples.max(1) as f32;
+    let mut canvas = Canvas::new(width, height);
+    for i in 0..(width as usize * height as usize) {
+        let o = i * 4;
+        let alpha = acc[o + 3] / k;
+        let a = alpha / 255.0;
+        let channel = |v: f32| -> u8 {
+            let straight = if a > 0.0 { (v / k) / a } else { 0.0 };
+            straight.round().clamp(0.0, 255.0) as u8
+        };
+        canvas.data[o] = channel(acc[o]);
+        canvas.data[o + 1] = channel(acc[o + 1]);
+        canvas.data[o + 2] = channel(acc[o + 2]);
+        canvas.data[o + 3] = alpha.round().clamp(0.0, 255.0) as u8;
+    }
+    canvas
+}
+
+/// Draw one frame of one comp on the CPU.
+///
+/// A comp with a shutter angle integrates the exposure: several subframes are drawn inside
+/// the shutter window and averaged. That is what stops fast moves from strobing, and it is
+/// the same number the `SHUTTER` detector measures in pixels per frame.
+pub fn render_frame(
+    doc: &Doc,
+    comp: &str,
+    frame: u32,
+    scale: f64,
+) -> Result<RenderOutput, RenderError> {
+    let c = doc
+        .comp(comp)
+        .map_err(|e| RenderError::Doc(e.to_string()))?;
+    let width = ((c.size[0] as f64) * scale).round().max(1.0) as u32;
+    let height = ((c.size[1] as f64) * scale).round().max(1.0) as u32;
+    let t = doc.frame_time(frame);
+
+    let (canvas, drawn, skipped, samples) = if c.shutter > 0.0 {
+        let exposure = (c.shutter.clamp(0.0, 360.0) / 360.0) / doc.fps.as_f64();
+        let samples = c.samples.clamp(2, 64);
+        let mut acc = vec![0f32; (width as usize) * (height as usize) * 4];
+        let mut seen: Option<(Vec<RenderedLayer>, Vec<String>)> = None;
+        for i in 0..samples {
+            let u = i as f64 / (samples - 1) as f64;
+            let sub = t - exposure / 2.0 + exposure * u;
+            let (cv, layers, skipped) = draw_at(doc, comp, sub, scale)?;
+            if seen.is_none() {
+                seen = Some((layers, skipped));
+            }
+            accumulate(&mut acc, &cv);
+        }
+        let (layers, skipped) = seen.unwrap_or_default();
+        (
+            average(&acc, width, height, samples),
+            layers,
+            skipped,
+            samples,
+        )
+    } else {
+        let (cv, layers, skipped) = draw_at(doc, comp, t, scale)?;
+        (cv, layers, skipped, 1)
+    };
+
     let png = canvas.to_png()?;
     Ok(RenderOutput {
         width,
@@ -360,7 +439,8 @@ pub fn render_frame(
         pixels: canvas.data,
         png,
         layers: drawn,
-        skipped: skipped.into_iter().collect(),
+        skipped,
+        samples,
     })
 }
 
@@ -463,6 +543,42 @@ mod tests {
             panic!("bless: {hash}");
         }
         assert_eq!(hash, EXPECTED, "frame 30 pixels changed");
+    }
+
+    #[test]
+    fn motion_blur_integrates_the_exposure() {
+        let mut doc = Doc::starter();
+        doc.comps.get_mut("main").unwrap().shutter = 180.0;
+        doc.comps.get_mut("main").unwrap().samples = 8;
+        let mut no_blur = Doc::starter();
+        no_blur.comps.get_mut("main").unwrap().shutter = 0.0;
+        let sharp = render_frame(&no_blur, "main", 9, 0.25).unwrap();
+        // Frame 9 is mid-move, so the two must differ.
+        let blurred = render_frame(&doc, "main", 9, 0.25).unwrap();
+        assert_eq!(blurred.samples, 8);
+        assert_eq!(sharp.samples, 1);
+        assert_ne!(sharp.pixels, blurred.pixels, "a moving title should blur");
+        let again = render_frame(&doc, "main", 9, 0.25).unwrap();
+        assert_eq!(blurred.pixels, again.pixels, "blur must be deterministic");
+    }
+
+    #[test]
+    fn a_static_frame_survives_blur() {
+        let mut doc = Doc::starter();
+        doc.comps.get_mut("main").unwrap().shutter = 180.0;
+        let mut no_blur = Doc::starter();
+        no_blur.comps.get_mut("main").unwrap().shutter = 0.0;
+        // Frame 60 is after the move has settled, so averaging changes nothing.
+        let sharp = render_frame(&no_blur, "main", 60, 0.25).unwrap();
+        let blurred = render_frame(&doc, "main", 60, 0.25).unwrap();
+        let max_diff = sharp
+            .pixels
+            .iter()
+            .zip(blurred.pixels.iter())
+            .map(|(a, b)| (*a as i32 - *b as i32).abs())
+            .max()
+            .unwrap_or(0);
+        assert!(max_diff <= 1, "static content shifted by {max_diff}");
     }
 
     #[test]

@@ -56,6 +56,7 @@ pub fn run(doc: &Doc, comp: &str, frame: Option<u32>) -> Vec<Defect> {
     palette(doc, comp, &mut out);
     ease_flat(doc, comp, &mut out);
     hold_none(doc, comp, &mut out);
+    shutter(doc, comp, &mut out);
     stagger(doc, comp, frame, &mut out, frame_of);
     let _ = c;
     out
@@ -224,6 +225,54 @@ fn hold_none(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
         // engine can pick for the agent.
         fix_op: None,
     });
+}
+
+/// Above 1.5 px per frame a move strobes unless the shutter integrates it. The fix is the
+/// film default, and it is a number the renderer actually reads.
+fn shutter(doc: &Doc, comp: &str, out: &mut Vec<Defect>) {
+    let Ok(c) = doc.comp(comp) else { return };
+    if c.shutter > 0.0 {
+        return;
+    }
+    let fps = doc.fps.as_f64().max(1.0);
+    for layer in &c.layers {
+        let Some(pos) = &layer.transform.position else {
+            continue;
+        };
+        let Some(kfs) = pos.kf.as_ref() else { continue };
+        let mut worst = 0.0f64;
+        let mut at = 0.0f64;
+        for pair in kfs.windows(2) {
+            let dt = (pair[1].t - pair[0].t).max(1e-9);
+            let speed = travel("transform.position", &pair[0].v, &pair[1].v) / (dt * fps);
+            if speed > worst {
+                worst = speed;
+                at = pair[0].t;
+            }
+        }
+        if worst <= 1.5 {
+            continue;
+        }
+        out.push(Defect {
+            code: "SHUTTER",
+            severity: "warn",
+            comp: comp.into(),
+            layer: Some(layer.id.clone()),
+            frame: Some(doc.fps.ticks_to_frame(kinema_time::seconds_to_ticks(at))),
+            evidence: json!({
+                "pixels_per_frame": (worst * 100.0).round() / 100.0,
+                "threshold": 1.5,
+                "shutter_deg": c.shutter,
+                "fps": fps,
+            }),
+            hint: "moves above 1.5 px per frame strobe without motion blur; a 180 degree shutter is the film default".into(),
+            fix_op: Some(set_prop(
+                format!("comp:{comp}/shutter"),
+                json!(180.0),
+                "integrate the exposure with a 180 degree shutter",
+            )),
+        });
+    }
 }
 
 /// Saturated small text on a saturated ground is the first thing 4:2:0 destroys.
@@ -703,6 +752,19 @@ mod tests {
             d.fix_op.is_none(),
             "choosing a beat to hold is a directing call"
         );
+    }
+
+    #[test]
+    fn fast_moves_without_a_shutter_are_caught() {
+        let mut doc = Doc::starter();
+        doc.comps.get_mut("main").unwrap().shutter = 0.0;
+        let found = defects(&doc);
+        let d = found.iter().find(|d| d.code == "SHUTTER").expect("SHUTTER");
+        assert!(d.evidence["pixels_per_frame"].as_f64().unwrap() > 1.5);
+        let op: kinema_doc::Op = serde_json::from_value(d.fix_op.clone().unwrap()).unwrap();
+        doc.apply(&op).unwrap();
+        assert_eq!(doc.comps["main"].shutter, 180.0);
+        assert!(!defects(&doc).iter().any(|d| d.code == "SHUTTER"));
     }
 
     #[test]

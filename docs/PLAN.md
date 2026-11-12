@@ -152,14 +152,14 @@ measurable. Each gate is an `assert` with a `fix_op`.
 | code | detector | status |
 | --- | --- | --- |
 | STAGGER | >70% of layers enter on one frame | **P0** |
-| EASE-FLAT | linear/symmetric easing on moves >200 ms or >2% of frame | P3 |
-| HOLD-NONE | no still frame in 3 s; constant motion is the loudest tell | P3 |
-| SHUTTER | >1.5 px/frame with <8 subframe samples; 180° = 1/(2·fps) | P3 |
+| EASE-FLAT | linear/symmetric easing on moves >200 ms or >2% of frame | **P0** |
+| HOLD-NONE | no still frame in 3 s; constant motion is the loudest tell | **P0** (advisory) |
+| SHUTTER | >1.5 px/frame with <8 subframe samples; 180° = 1/(2·fps) | **P0** |
 | CUT-TIMING | dialogue cut >6 frames after last speech (Ford: 35% within one) | P3 |
 | JUMPCUT | same subject across <30° camera or <30% scale change | P3 |
 | TYPE-FAKE | synthesised italic/bold/small caps, or a system fallback face | **P0** |
 | PALETTE | out-of-Rec.709 colours, multiple accents, rainbow gradients | **P0** (accents) |
-| CHROMA | saturated text <32 px on saturated ground; 4:2:0 destroys it | P3 |
+| CHROMA | saturated text <32 px on saturated ground; 4:2:0 destroys it | **P0** |
 | BANDING | flat gradient >2% of frame, <2 codes/100 px, no dither | P3 |
 | READ | contrast <4.5:1, outside title-safe, over busy unprotected area | **P0** (contrast) |
 | LOUD | dialogue off −14/−16 LUFS, bed >−6 LU under, ducking or TP wrong | P5 |

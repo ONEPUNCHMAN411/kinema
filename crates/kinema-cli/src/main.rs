@@ -135,11 +135,18 @@ fn capabilities() -> Value {
             {"code": "CHROMA", "severity": "warn", "detects": "saturated text under 32 px on a saturated ground", "fix": true},
             {"code": "PALETTE", "severity": "warn", "detects": "more than one accent hue", "fix": true},
             {"code": "EASE-FLAT", "severity": "warn", "detects": "linear or symmetric easing on moves over 200 ms or 2% of frame", "fix": true},
+            {"code": "SHUTTER", "severity": "warn", "detects": "motion above 1.5 px/frame with no shutter", "fix": true},
             {"code": "HOLD-NONE", "severity": "warn", "detects": "no still moment in over three seconds", "fix": false},
             {"code": "STAGGER", "severity": "warn", "detects": "more than 70% of layers entering on one frame", "fix": true}
         ],
         "checks_advisory": {"HOLD-NONE": "the remedy is which beat to hold; the hint names it, the engine will not pick"},
-        "checks_pending": ["SHUTTER", "CUT-TIMING", "JUMPCUT", "BANDING", "LOUD"],
+        "checks_pending": ["CUT-TIMING", "JUMPCUT", "BANDING", "LOUD"],
+        "motion_blur": {
+            "setting": "comp:<id>/shutter, degrees; 0 disables",
+            "film_default": 180,
+            "samples": "comp:<id>/samples, 2-64 (default 8)",
+            "cost": "linear in samples",
+        },
         "layer_kinds": ["solid", "text", "shape"],
         "layer_kinds_pending": ["image", "comp", "adjustment"],
         "props": ["value", "kf", "expr", "link", "graph"],
@@ -547,6 +554,7 @@ fn cmd_render(argv: &[String]) -> R {
         "sha256": deps::hash_bytes(&rendered.png),
         "frame_hash": deps::hash_frame(&doc, &comp, frame, "strict"),
         "layers": rendered.layers.iter().map(|l| json!({"id": l.id, "kind": l.kind, "opacity": l.opacity})).collect::<Vec<_>>(),
+        "samples": rendered.samples,
         "skipped": rendered.skipped,
         "ms": ms,
     }))
@@ -608,9 +616,50 @@ fn render_sequence(argv: &[String], spec: &str) -> R {
         ]
     };
 
+    // Incremental re-render: a frame is reusable when its identity is unchanged and the
+    // file on disk is still the file we recorded. Anything else is drawn again.
+    let variant = format!("strict@{scale}");
+    let mut previous: std::collections::BTreeMap<u32, Value> = std::collections::BTreeMap::new();
+    if let Ok(src) = fs::read_to_string(dir.join("manifest.json")) {
+        if let Some(frames) = serde_json::from_str::<Value>(&src)
+            .ok()
+            .and_then(|m| m.get("frames").and_then(|f| f.as_array()).cloned())
+        {
+            for f in frames {
+                if let Some(n) = f.get("frame").and_then(|v| v.as_u64()) {
+                    previous.insert(n as u32, f);
+                }
+            }
+        }
+    }
+
     let started = Instant::now();
     let mut frames = Vec::new();
+    let mut rendered = 0usize;
+    let mut reused = 0usize;
     for frame in start..=end {
+        let frame_hash = deps::hash_frame(&doc, &comp, frame, &variant);
+        if let Some(prev) = previous.get(&frame) {
+            let file = prev
+                .get("file")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let sha = prev
+                .get("sha256")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let same_identity =
+                prev.get("frame_hash").and_then(|v| v.as_str()) == Some(&frame_hash);
+            if same_identity && !file.is_empty() {
+                if let Ok(bytes) = fs::read(dir.join(file)) {
+                    if deps::hash_bytes(&bytes) == sha {
+                        frames.push(prev.clone());
+                        reused += 1;
+                        continue;
+                    }
+                }
+            }
+        }
         let out = raster::render_frame(&doc, &comp, frame, scale)
             .map_err(|e| json!({ "ok": false, "error": e.to_json() }))?;
         let file = format!("frame_{frame:05}.png");
@@ -621,8 +670,9 @@ fn render_sequence(argv: &[String], spec: &str) -> R {
             "bytes": out.png.len(),
             "sha256": deps::hash_bytes(&out.png),
             "pixels": deps::hash_bytes(&out.pixels),
-            "frame_hash": deps::hash_frame(&doc, &comp, frame, "strict"),
+            "frame_hash": frame_hash,
         }));
+        rendered += 1;
     }
     let ms = started.elapsed().as_millis();
     let manifest = json!({
@@ -636,6 +686,9 @@ fn render_sequence(argv: &[String], spec: &str) -> R {
         "count": frames.len(),
         "first": start,
         "last": end,
+        "variant": variant,
+        "rendered": rendered,
+        "reused": reused,
         "total_ms": ms,
         "frames": frames,
     });

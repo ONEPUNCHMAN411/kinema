@@ -41,8 +41,19 @@ pub struct Comp {
     pub size: [u32; 2],
     /// Seconds.
     pub duration: f64,
+    /// Shutter angle in degrees. 180 is the film default and 0 switches motion blur off,
+    /// so a document that does not ask for it stays as sharp as it always was.
+    #[serde(default)]
+    pub shutter: f64,
+    /// Subframe samples used when `shutter > 0`.
+    #[serde(default = "default_samples")]
+    pub samples: u32,
     #[serde(default)]
     pub layers: Vec<Layer>,
+}
+
+fn default_samples() -> u32 {
+    8
 }
 
 impl Comp {
@@ -406,6 +417,10 @@ impl Doc {
             Comp {
                 size: [1920, 1080],
                 duration: 5.0,
+                // The title crosses 100 px in 18 frames, so it needs a shutter to not
+                // strobe. 180 degrees is the film default.
+                shutter: 180.0,
+                samples: default_samples(),
                 layers,
             },
         );

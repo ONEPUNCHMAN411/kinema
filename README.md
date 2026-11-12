@@ -41,7 +41,8 @@ Built:
 - `kinema-doc` — the document, properties (`value | kf | expr | link | graph`), typed ops
   with inverses, and an append-only journal.
 - `kinema-deps` — canonical JSON and content hashes for documents, layers and frames.
-- `kinema-raster` — CPU RGBA canvas, blend modes, bitmap text, PNG out.
+- `kinema-raster` — CPU RGBA canvas, blend modes, bitmap text, motion blur by subframe
+  integration, PNG out.
 - `kinema-checks` — the first craft detectors with `fix_op` remedies.
 - `kinema-cli` — `kin` itself, including asset records with looked-up licences and
   `undo` driven by the journal's stored inverses.
@@ -55,7 +56,7 @@ Not built yet: GPU raster, media decode, encode, audio, assets, capture, templat
 Each returns a typed `not-implemented` error with a hint rather than pretending.
 
 Detectors live in this build: `TYPE-FAKE`, `READ`, `CHROMA`, `PALETTE`, `EASE-FLAT`,
-`HOLD-NONE` and `STAGGER`. All but `HOLD-NONE` ship a `fix_op`, and `kin check --fix`
+`SHUTTER`, `HOLD-NONE` and `STAGGER`. All but `HOLD-NONE` ship a `fix_op`, and `kin check --fix`
 applies them to a fixpoint: remedies are measured against one snapshot, so CHROMA's
 remedy and READ's can disagree, and only re-measuring after each step settles it. The
 remaining detectors are specified with their thresholds in `docs/PLAN.md` and land with
@@ -85,6 +86,8 @@ kin credits --project demo       # licence roll-up and release gate
 kin asset add still.png --project demo --spdx cc-by-4.0 --source-url <url> --author <name>
 kin undo --project demo          # replay the journal's inverses
 kin render --project demo --frames 0-59 -o demo/frames   # sequence + hash manifest
+kin apply --project demo --ops -  <<<'{"op":"set-prop","path":"comp:main/shutter","value":180,"reason":"film default"}'
+kin render --project demo --frames 0-59 -o demo/frames   # only changed frames redraw
 ```
 
 Every verb prints JSON. Errors carry `code`, `message`, `hint`, `fix_op` and `doc`:
